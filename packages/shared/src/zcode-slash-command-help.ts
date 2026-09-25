@@ -14,13 +14,13 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "Pass a command name with or without the leading slash for command-specific help.",
       ],
       name: "help",
-      summary: "Show this slash command help.",
+      summary: "显示本斜杠命令帮助。",
       usage: "/help [command]",
     },
     {
       details: ["Runs the core manual compaction path and forwards optional summary instructions."],
       name: "compact",
-      summary: "Compact the current conversation with optional instructions.",
+      summary: "压缩当前对话，可附加说明。",
       usage: "/compact [instructions]",
     },
     {
@@ -30,7 +30,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "This command targets the workspace root, not the user default ~/.zcodium/AGENTS.md.",
       ],
       name: "init",
-      summary: "Create or update workspace AGENTS.md instructions.",
+      summary: "创建或更新工作区的 AGENTS.md 说明。",
       usage: "/init [notes]",
     },
     {
@@ -39,7 +39,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "Use status, resume, or stop to manage the latest or a named workflow run.",
       ],
       name: "expert",
-      summary: "Run or manage the expert workflow.",
+      summary: "运行或管理专家工作流。",
       usage: "/expert [status|resume|stop|<task>]",
     },
     {
@@ -50,7 +50,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "Use a listed level to switch the current session reasoning effort.",
       ],
       name: "effort",
-      summary: "Show or switch the current session reasoning effort.",
+      summary: "查看或切换当前会话的推理强度。",
       usage: "/effort [list|<level>]",
     },
     {
@@ -60,7 +60,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "resume asks the server; a run the server refuses reports the structured reason.",
       ],
       name: "dwf",
-      summary: "List, cancel, or resume dynamic workflow runs.",
+      summary: "列出、取消或恢复动态工作流运行。",
       usage: "/dwf [list|cancel [runId]|resume <runId>]",
     },
     {
@@ -69,7 +69,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "Use latest or a specific checkpoint id to bypass the picker.",
       ],
       name: "fork",
-      summary: "Fork a new session from a workspace checkpoint.",
+      summary: "从工作区检查点派生一个新会话。",
       usage: "/fork [latest|checkpointId]",
     },
     {
@@ -79,7 +79,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "Use auto, en-US, or zh-CN to switch and persist the UI locale.",
       ],
       name: "locale",
-      summary: "Show or switch the UI locale.",
+      summary: "查看或切换界面语言。",
       usage: "/locale [auto|en-US|zh-CN]",
     },
     {
@@ -88,7 +88,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "Use connect or disconnect with a configured server name to manage the session connection.",
       ],
       name: "mcp",
-      summary: "Show or manage configured MCP servers.",
+      summary: "查看或管理已配置的 MCP 服务器。",
       usage: "/mcp [list|status|connect <server>|disconnect <server>]",
     },
     {
@@ -100,7 +100,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "Plugin capability changes apply to new sessions.",
       ],
       name: "plugins",
-      summary: "Open the plugin manager.",
+      summary: "打开插件管理器。",
       usage: "/plugins [list|enable <plugin>|disable <plugin>]",
     },
     {
@@ -111,7 +111,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "Picker rows and explicit input submit /mode <mode> commands.",
       ],
       name: "mode",
-      summary: "Show or switch the current permission mode.",
+      summary: "查看或切换当前权限模式。",
       usage: "/mode [plan|build|edit|yolo]",
     },
     {
@@ -120,14 +120,14 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "Use a provider/model id to select a model with its default reasoning effort; use /effort to change the effort.",
       ],
       name: "model",
-      summary: "Show or switch the current session model.",
+      summary: "查看或切换当前会话模型。",
       usage: "/model [list|provider/model]",
     },
     {
       aliases: ["clear"],
       details: ["Starts a fresh root session and resets the TUI session projection."],
       name: "new",
-      summary: "Start a fresh session in the TUI.",
+      summary: "在终端界面中开启一个新会话。",
       usage: "/new",
     },
     {
@@ -138,7 +138,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "/continue resumes the latest root session for the current directory.",
       ],
       name: "resume",
-      summary: "Resume a saved session.",
+      summary: "恢复已保存的会话。",
       usage: "/resume [sessionId]",
     },
     {
@@ -147,7 +147,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "Use status to show the latest checkpoint, or latest/a checkpoint id to restore directly.",
       ],
       name: "rewind",
-      summary: "Inspect or restore workspace checkpoints.",
+      summary: "查看或恢复工作区检查点。",
       usage: "/rewind [latest|checkpointId]",
     },
     {
@@ -156,7 +156,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "With a name, rewrites the next prompt so the Skill tool must load that skill first.",
       ],
       name: "skill",
-      summary: "List skills, or force the next prompt to load one.",
+      summary: "列出技能，或让下一条提示强制加载指定技能。",
       usage: "/skill [<skill-name> [task]]",
     },
     {
@@ -167,7 +167,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "Use pause, resume, or clear to manage the current goal.",
       ],
       name: "goal",
-      summary: "Show or set the current session goal.",
+      summary: "查看或设置当前会话目标。",
       usage: "/goal [pause|resume|clear|replace <objective>|<objective>]",
     },
     {
@@ -177,7 +177,7 @@ export const BUILTIN_ZCODE_SLASH_COMMAND_HELP_ENTRIES: readonly BuiltinZCodeSlas
         "In the desktop app the command is offered only while dynamic workflows are enabled for this client.",
       ],
       name: "workflow",
-      summary: "Design and launch a dynamic workflow for a task.",
+      summary: "为任务设计并启动一个动态工作流。",
       usage: "/workflow [what the workflow should accomplish]",
     },
   ] as const;
