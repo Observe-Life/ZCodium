@@ -61,6 +61,9 @@
     ".agents/skills",
     "packages/formal-proof",
     "apps/zcode-cli",
-    "docs/electron"
+    "docs/electron",
+    // ZCodium 自用版（custom 分支）：bridge/ 是独立手机远控桥单文件与官方页面
+    // 压缩产物快照（vendored assets），不参与产品代码规范，且 minified 文件无法加抑制注释。
+    "bridge"
   ]
 }
