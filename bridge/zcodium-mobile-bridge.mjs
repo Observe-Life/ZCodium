@@ -413,7 +413,7 @@ class WorkspaceRelay {
         this.lastPageId = Math.max(this.lastPageId, id);
         if (this.debugFrames) log("ws-req", { len: body.length, head: body.subarray(0, 24).toString("hex") });
         if (CFG.debugAgent) {
-          try { const p = rpcParseFrame(body); const [tc, rid, ch, me] = p.header || []; if (ch === "zcode-agent") log("agent-req", { me, args: JSON.stringify(p.body).slice(0, 300) }); } catch {}
+          try { const p = rpcParseFrame(body); const [tc, rid2, ch, me] = p.header || []; if (ch === "zcode-agent" && (me === "initializeConversationV4" || me === "subscribeSessionsIndexV4")) { fs.writeFileSync(path.join(HERE, `handshake_${me}.json`), JSON.stringify(p.body)); log("handshake-captured", { me }); } } catch {}
         }
         if (!this.tryLocalTaskList(body)) this.toBackend(body);
         this.toPage(3, Buffer.alloc(0), id);
@@ -512,6 +512,7 @@ async function sendServerChan(cfg, title, short) {
 function isQuiescent(s) {
   return (s.phase === "completedSuccess" || s.phase === "error") && s.hasBackgroundWork !== true && s.sessionEnded === true;
 }
+let notifySeeded = false; // 初始快照只打底不推送，避免启动时把历史静止会话全推一遍
 function handleSessionsSnapshot(sessions) {
   const cfg = loadNotifyConfig();
   if (!cfg || !cfg.enabled) return;
@@ -519,6 +520,7 @@ function handleSessionsSnapshot(sessions) {
     if (!s || !s.sessionId) continue;
     if (!isQuiescent(s)) continue;
     const key = `${s.sessionId}|${s.lastActivityAt || 0}`;
+    if (!notifySeeded) { notifyState.sent[key] = true; continue; } // 打底：标记为已处理，不推送
     if (notifyState.sent[key]) continue;
     if (s.phase === "error" && cfg.events && cfg.events.error === false) continue;
     if (s.phase === "completedSuccess" && cfg.events && cfg.events.done === false) continue;
@@ -539,17 +541,27 @@ function startNotifySubscription() {
   ws.binaryType = "arraybuffer";
   notifySub = ws;
   let rid = 0;
+  const initId = { v: 0 };
   const sendRpc = (channel, method, args) => {
     const id = ++rid;
     const body = Buffer.concat([rpcSerialize([100, id, channel, method]), rpcSerialize(args === undefined ? null : args)]);
     const h = Buffer.alloc(13);
     h.writeUInt8(1, 0); h.writeUInt32BE(0, 1); h.writeUInt32BE(0, 5); h.writeUInt32BE(body.length, 9);
     ws.send(Buffer.concat([h, body]));
+    return id;
+  };
+  const sendListen = (channel, method, args) => {
+    const id = ++rid;
+    const body = Buffer.concat([rpcSerialize([102, id, channel, method]), rpcSerialize(args === undefined ? null : args)]);
+    const h = Buffer.alloc(13);
+    h.writeUInt8(1, 0); h.writeUInt32BE(0, 1); h.writeUInt32BE(0, 5); h.writeUInt32BE(body.length, 9);
+    ws.send(Buffer.concat([h, body]));
+    return id;
   };
   ws.addEventListener("open", () => {
-    sendRpc("zcode-agent", "initializeConversationV4", [{ kind: "clientHello", protocolVersion: 3, clientId: "zcodium-bridge-notify", clientKind: "web", appVersion: "bridge", capabilities: {} }]);
-    sendRpc("zcode-agent", "subscribeSessionsIndexV4", [{ workspacePath: CFG.workspacePath, runtimePolicy: "existing-only" }]);
-    log("notify-subscribed", { workspacePath: CFG.workspacePath });
+    // 事件订阅（页面同款）：onDynamicSessionsIndexFrame（102 EventListen），再走三步握手
+    sendListen("zcode-agent", "onDynamicSessionsIndexFrame", { workspacePath: CFG.workspacePath });
+    initId.v = sendRpc("zcode-agent", "helloConversationV4", []);
   });
   ws.addEventListener("message", (ev) => {
     const b = Buffer.from(ev.data);
@@ -559,13 +571,37 @@ function startNotifySubscription() {
     const len = b.readUInt32BE(9);
     try {
       const p = rpcParseFrame(b.subarray(13, 13 + len));
-      const [tcode] = p.header || [];
+      const [tcode, rmid] = p.header || [];
+      if (CFG.debugAgent) log("notify-frame", { tcode, rmid });
+      if (initId.v && rmid === initId.v) {
+        const stage = initId.stage || "hello";
+        if (stage === "hello") {
+          initId.stage = "init";
+          initId.v = sendRpc("zcode-agent", "initializeConversationV4", [{ kind: "clientHello", protocolVersion: 3, clientId: "client-" + crypto.randomUUID(), clientKind: "web", appVersion: "unknown", capabilities: { workspaceHookReviewUi: true } }]);
+          return;
+        }
+        if (stage === "init") {
+          initId.stage = "sub";
+          initId.v = sendRpc("zcode-agent", "subscribeSessionsIndexV4", [{ workspacePath: CFG.workspacePath, runtimePolicy: "existing-only" }]);
+          log("notify-subscribed", { workspacePath: CFG.workspacePath, initOk: tcode === 201 });
+          return;
+        }
+        initId.v = 0;
+        return;
+      }
       if (tcode !== 204) return;
       const frame = p.body && p.body.frame;
       const snap = frame && frame.payload && frame.payload.snapshot;
-      if (snap && Array.isArray(snap.sessions)) handleSessionsSnapshot(snap.sessions);
-      const delta = frame && frame.payload && frame.payload.delta;
-      if (delta && Array.isArray(delta.sessions)) handleSessionsSnapshot(delta.sessions);
+      if (snap && Array.isArray(snap.sessions)) {
+        const wasSeeded = notifySeeded;
+        handleSessionsSnapshot(snap.sessions);
+        if (!wasSeeded) { notifySeeded = true; saveNotifyState(); log("notify-seeded", { n: snap.sessions.length }); }
+      }
+      const delta = frame && frame.payload && frame.payload.deltas;
+      if (Array.isArray(delta)) {
+        const sessions = delta.filter((d) => d && d.op === "session.upserted" && d.session).map((d) => d.session);
+        if (sessions.length) handleSessionsSnapshot(sessions);
+      }
     } catch {}
   });
   ws.addEventListener("close", () => { log("notify-sub-closed", {}); setTimeout(startNotifySubscription, 5000); });
