@@ -25,8 +25,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-workspace
-      - name: Build CLI workspace packages
-        run: pnpm -r --filter "./apps/zcode-cli/packages/*" build
+      - name: Bootstrap workspace builds
+        run: pnpm build:bootstrap
       - name: Build ZCode CLI distribution
         run: pnpm build:zcode --base-url http://127.0.0.1/zcode/
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
