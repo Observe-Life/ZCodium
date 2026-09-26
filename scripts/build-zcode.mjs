@@ -100,12 +100,12 @@ function commandText(command, args) {
 
 function run(command, args, options = {}) {
   console.log(`[zcode] ${commandText(command, args)}`);
-  // ZCodium fork patch: spawnSync on Windows cannot resolve bare "pnpm" (ENOENT); use pnpm.cmd.
-  const resolvedCommand =
-    process.platform === "win32" && /^(pnpm|npm|npx)$/.test(command) ? `${command}.cmd` : command;
-  const result = spawnSync(resolvedCommand, args, {
+  // ZCodium fork patch: Windows + Node>=18.20 refuses spawning .cmd without a shell (CVE-2024-27980).
+  const winShell = process.platform === "win32";
+  const result = spawnSync(command, args, {
     cwd: root,
     stdio: "inherit",
+    ...(winShell ? { shell: true } : {}),
     ...options,
   });
   if (result.error) {
