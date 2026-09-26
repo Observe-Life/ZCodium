@@ -17,6 +17,7 @@
  * 零第三方依赖（Node ≥ 22）。
  */
 import http from "node:http";
+import net from "node:net";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
@@ -547,9 +548,12 @@ function handleSessionsSnapshot(sessions) {
       notifyState.asks[s.sessionId] = ask.sig;
       saveNotifyState();
       if (notifySeeded && events.ask !== false) {
-        const label = ask.kind === "permission" ? "请求权限确认" : ask.kind === "userInput" ? "有问题等你回答" : "等待你的决策";
+        // 标题遵循安卓端既有规范（PushSettingsActivity/serverchan-notify.js）：【智能体】请决策
+        const detail = ask.kind === "permission"
+          ? "等待权限确认" + (ask.toolName ? `（${ask.toolName}）` : "")
+          : ask.kind === "userInput" ? "有问题等你回答" : "等待你的决策";
         const short = `会话：${String(s.title || s.sessionId).slice(0, 40)}`;
-        sendServerChan(cfg, `【智能体】${label}`, short, sessionDesp(s, ask.toolName ? `工具：${ask.toolName}` : null))
+        sendServerChan(cfg, "【智能体】请决策", short, sessionDesp(s, detail))
           .catch((e) => log("notify-error", { msg: String(e) }));
         log("notify-ask-sent", { sessionId: s.sessionId, kind: ask.kind, tool: ask.toolName || null });
       }
