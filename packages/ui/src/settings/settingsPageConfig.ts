@@ -18,6 +18,7 @@ import {
   WandSparkles,
   Keyboard,
   FileSearch,
+  Smartphone,
 } from "lucide-react";
 import { isSettingsSectionEnabled, type SettingsSectionId } from "@/lib/settingsNavigation.js";
 import type { Theme } from "@/useTheme.js";
@@ -59,6 +60,13 @@ const BASE_SETTINGS_SECTIONS: SettingsSectionDefinition[] = [
     id: "general",
     icon: Settings2,
     titleId: "settings.systemTitle",
+    groupId: "basics",
+  },
+  // ZCodium 自用版增强功能（custom 分支）：手机远控开关托管，置于通用之后首屏可见。
+  {
+    id: "enhanced",
+    icon: Smartphone,
+    titleId: "settings.enhanced.title",
     groupId: "basics",
   },
   {

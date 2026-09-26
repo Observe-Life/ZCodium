@@ -49,6 +49,8 @@ import { PluginsSection } from "@/settings/PluginsSection.js";
 import { HooksSection } from "@/settings/HooksSection.js";
 import { WorkspaceFileSearchSection } from "@/settings/WorkspaceFileSearchSection.js";
 import { MemorySettingsSection } from "@/settings/MemorySettingsSection.js";
+// ZCodium 自用版增强功能分区（custom 分支）：手机远控开关托管。
+import { MobileRemoteSection } from "@/settings/MobileRemoteSection.js";
 import { BrowserSettingsSection } from "@/settings/BrowserSettingsSection.js";
 import { ComputerUseSection } from "@/settings/ComputerUseSection.js";
 import { ShortcutSettingsSection } from "@/settings/ShortcutSettingsSection.js";
@@ -1038,6 +1040,19 @@ export function SettingsPage({
                               }
                             />
                           </ServiceProvider>
+                        ) : activeSection === "enhanced" ? (
+                          <MobileRemoteSection
+                            config={sharedSettings?.mobileRemoteControl}
+                            dataBaseDir={sharedSettings?.dataBaseDir}
+                            onUpdate={async (patch) => {
+                              await updateSharedSettings({
+                                mobileRemoteControl: {
+                                  ...sharedSettings?.mobileRemoteControl,
+                                  ...patch,
+                                },
+                              });
+                            }}
+                          />
                         ) : activeSection === "memory" ? (
                           <ServiceProvider services={localHostServices}>
                             {/* Memory catalog 始终使用本地 Host，避免远程 workspace 误读本机数据。 */}

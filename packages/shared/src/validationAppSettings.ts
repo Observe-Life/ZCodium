@@ -415,6 +415,18 @@ function migrateLegacyWorkspaceSession(value: unknown): unknown {
   return migrated;
 }
 
+/**
+ * ZCodium 自用版增强功能：手机远控托管配置（custom 分支专有字段）。
+ * 完整 schema 要求全字段；设置补丁侧用 .partial() 允许逐项写入。
+ */
+export const mobileRemoteControlSettingsSchema = z.object({
+  enabled: z.boolean(),
+  token: z.string().min(8),
+  port: z.number().int().positive().max(65535),
+  backendCliPath: z.string().trim().min(1),
+  workspacePath: z.string().trim().min(1),
+});
+
 const appSettingsObjectSchema = z.object({
   recentProjects: z.array(z.string()).default([]),
   locale: localeSchema.default("zh-CN"),
@@ -468,6 +480,7 @@ const appSettingsObjectSchema = z.object({
   skippedElectronUpdateVersions: skippedElectronUpdateVersionsSchema,
   settingsSyncFirstRunPromptHandled: z.boolean().optional(),
   zcodeEndpointOrigin: zcodeEndpointOriginSchema.optional(),
+  mobileRemoteControl: mobileRemoteControlSettingsSchema.partial().optional(),
 });
 
 export const appSettingsSchema = z.preprocess(

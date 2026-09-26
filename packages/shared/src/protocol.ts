@@ -361,4 +361,20 @@ export interface AppSettings {
   settingsSyncFirstRunPromptHandled?: boolean;
   /** 设置页里的临时 endpoint override；正式/测试默认 base url 由 ZCODE_BASE_URL env 管理。 */
   zcodeEndpointOrigin?: string;
+  /**
+   * ZCodium 自用版增强功能：手机远控托管（custom 分支）。
+   * enabled 时桌面主进程自动拉起并守护 `zcode --web` 后端与 zcodium-mobile-bridge；
+   * 退出/关开关自动回收。官方上游无此字段，缺失即关闭，合并零影响。
+   */
+  mobileRemoteControl?: {
+    enabled?: boolean;
+    /** 配对令牌；首次开启时由桌面端生成随机值。 */
+    token?: string;
+    /** 桥监听端口（默认 4310）。 */
+    port?: number;
+    /** CLI 发行版入口 bin/zcode.mjs 的绝对路径。 */
+    backendCliPath?: string;
+    /** 远控暴露的工作区路径。 */
+    workspacePath?: string;
+  };
 }

@@ -1983,6 +1983,23 @@ const zhCN: Record<string, string> = {
   "settings.nativeSearchEnhancements": "增强 Find 和 Grep",
   "settings.nativeSearchEnhancementsDescription":
     "在新建会话或应用重启后恢复的会话中使用增强 Find 和 Grep。当前会话保持现有设置；Windows 的 Find 保持不变。",
+  // ZCodium 自用版「增强功能」（custom 分支）：手机远控开关托管。
+  "settings.enhanced.title": "增强功能",
+  "settings.enhanced.mobileRemote.title": "手机远控",
+  "settings.enhanced.mobileRemote.desc":
+    "开启后桌面端自动运行远控服务（手机桥 + 智能体后端），手机浏览器打开配对 URL 即可控制本机智能体；退出桌面端自动回收。",
+  "settings.enhanced.mobileRemote.running": "运行中",
+  "settings.enhanced.mobileRemote.starting": "启动中…",
+  "settings.enhanced.mobileRemote.stopped": "未运行",
+  "settings.enhanced.mobileRemote.pairUrl": "配对 URL",
+  "settings.enhanced.mobileRemote.pairUrlDesc": "在同一个 Wi-Fi 下的手机浏览器中打开即可连接。",
+  "settings.enhanced.mobileRemote.token": "配对令牌",
+  "settings.enhanced.mobileRemote.tokenDesc": "远控请求按此令牌校验；重置后需在手机重新打开。",
+  "settings.enhanced.mobileRemote.port": "服务端口",
+  "settings.enhanced.mobileRemote.workspace": "远控工作区",
+  "settings.enhanced.mobileRemote.workspaceDesc": "手机侧看到的任务与会话所在工作区。",
+  "settings.enhanced.mobileRemote.backend": "智能体后端路径",
+  "settings.enhanced.mobileRemote.backendDesc": "zcode CLI 发行版的 bin/zcode.mjs 绝对路径。",
   "settings.memory": "记忆",
   "settings.memory.workspaceMemory": "工作区记忆",
   "settings.memoryDescription":

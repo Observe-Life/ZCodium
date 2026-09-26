@@ -2105,6 +2105,26 @@ const enUS: Record<string, string> = {
   "settings.nativeSearchEnhancements": "Enhanced Find and Grep",
   "settings.nativeSearchEnhancementsDescription":
     "Use enhanced Find and Grep in new sessions and sessions restored after an app restart. Active sessions keep their current setting; Find remains unchanged on Windows.",
+  // ZCodium custom edition "Enhanced features" (custom branch): mobile remote hosting.
+  "settings.enhanced.title": "Enhanced features",
+  "settings.enhanced.mobileRemote.title": "Mobile remote control",
+  "settings.enhanced.mobileRemote.desc":
+    "When on, the desktop app automatically runs the remote-control services (phone bridge + agent backend). Open the pairing URL in a phone browser to control the agent on this computer; services are reclaimed on app exit.",
+  "settings.enhanced.mobileRemote.running": "Running",
+  "settings.enhanced.mobileRemote.starting": "Starting…",
+  "settings.enhanced.mobileRemote.stopped": "Not running",
+  "settings.enhanced.mobileRemote.pairUrl": "Pairing URL",
+  "settings.enhanced.mobileRemote.pairUrlDesc": "Open it in a phone browser on the same Wi-Fi.",
+  "settings.enhanced.mobileRemote.token": "Pairing token",
+  "settings.enhanced.mobileRemote.tokenDesc":
+    "Requests are checked against this token. After a reset, reopen the URL on your phone.",
+  "settings.enhanced.mobileRemote.port": "Service port",
+  "settings.enhanced.mobileRemote.workspace": "Remote workspace",
+  "settings.enhanced.mobileRemote.workspaceDesc":
+    "The workspace whose tasks and sessions the phone controls.",
+  "settings.enhanced.mobileRemote.backend": "Agent backend path",
+  "settings.enhanced.mobileRemote.backendDesc":
+    "Absolute path to bin/zcode.mjs of the zcode CLI distribution.",
   "settings.memory": "Memory",
   "settings.memory.workspaceMemory": "Workspace Memory",
   "settings.memoryDescription":

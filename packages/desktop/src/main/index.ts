@@ -158,6 +158,11 @@ import {
   spawnHostProcess,
 } from "./desktopHostProcess.js";
 import { spawnCronScheduler, type CronSchedulerHandle } from "./desktopCronScheduler.js";
+// ZCodium 自用版增强功能：手机远控托管（custom 分支）。
+import {
+  startMobileRemoteSupervisor,
+  type MobileRemoteSupervisorHandle,
+} from "./desktopMobileRemoteSupervisor.js";
 import {
   clearWorkspaceDeepLinkStateForWindow,
   handleDeepLink,
@@ -583,6 +588,8 @@ const windowsCuaOperationIndicator = createWindowsCuaOperationIndicator({
 
 // 常驻 cron scheduler 进程句柄；app ready 后拉起，退出前销毁。
 let cronScheduler: CronSchedulerHandle | null = null;
+// 手机远控托管句柄；常驻轮询 setting.json 期望态，退出前回收后端+桥。
+let mobileRemoteSupervisor: MobileRemoteSupervisorHandle | null = null;
 // host → main 的定时任务派发结果，转交给 scheduler 结算。经模块变量转发以避免 spawn 顺序耦合。
 function forwardCronRunResult(
   result: Parameters<CronSchedulerHandle["handleCronRunResult"]>[0],
@@ -831,6 +838,9 @@ async function prepareAppQuit(reason: string, kind: AppShutdownKind = "normal"):
   const cronSchedulerToDispose = cronScheduler;
   cronScheduler = null;
 
+  const mobileRemoteToDispose = mobileRemoteSupervisor;
+  mobileRemoteSupervisor = null;
+
   const hostProcesses = [
     ...new Set([...windowHostProcessMap.values(), ...listDisposingHostProcesses()]),
   ];
@@ -846,6 +856,13 @@ async function prepareAppQuit(reason: string, kind: AppShutdownKind = "normal"):
         await cronSchedulerToDispose?.dispose();
       } catch (error) {
         logger.warn(`[app-quit] cron scheduler dispose failed (${reason}):`, error);
+      }
+    })(),
+    (async () => {
+      try {
+        await mobileRemoteToDispose?.dispose();
+      } catch (error) {
+        logger.warn(`[app-quit] mobile remote supervisor dispose failed (${reason}):`, error);
       }
     })(),
     // remote session、attachment 和 transport 都由窗口 Host 持有；这里先清理
@@ -1746,6 +1763,16 @@ app.whenReady().then(async () => {
       logger.error("[cron-scheduler] failed to spawn scheduler process:", error);
     }
   });
+
+  // ZCodium 自用版：手机远控开关（setting.json mobileRemoteControl）驱动后端+桥的自动起停。
+  try {
+    mobileRemoteSupervisor = startMobileRemoteSupervisor({
+      settingService: mainSettingService,
+      logger,
+    });
+  } catch (error) {
+    logger.error("[mobile-remote] failed to start supervisor:", error);
+  }
 
   if (process.platform === "win32") {
     // 打包态必须与 NSIS 快捷方式使用同一 AUMID，否则 Shell 把它们当成不同应用。

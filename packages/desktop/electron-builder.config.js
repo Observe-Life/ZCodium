@@ -619,6 +619,9 @@ export default {
   },
   extraResources: [
     { from: "bundled-remote-assets", to: "remote-assets" },
+    // ZCodium 自用版：手机远控桥（custom 分支）。主进程 desktopMobileRemoteSupervisor
+    // 按 process.resourcesPath/mobile-bridge 解析；dev 态走仓库 bridge/。
+    { from: resolve(workspaceRoot, "bridge"), to: "mobile-bridge" },
     { from: resolve(workspaceRoot, noticesFileName), to: noticesFileName },
     ...(targetPlatform.os === "darwin"
       ? [
