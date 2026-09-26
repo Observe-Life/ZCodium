@@ -45,7 +45,6 @@ function loadConfig() {
     provider: "glm",
     // Server酱³ 推送（沿用既有配置；enabled 由该文件控制）
     notifyConfigPath: "C:\\Users\\Bingcan Lin\\AppData\\Local\\ZCode\\serverchan-notify.json",
-    notifyDebounceMs: 90000, // 静默期：任务进入终态后稳定这么久才推送（防多轮接力刷屏）
     debugAgent: false, // 临时：抓取 zcode-agent 请求与事件结构（BRIDGE_DEBUG_AGENT=1）
     spawnBackend: null, // 例如 { command:"node", args:["...zcode.cjs","--web",...] }（增强功能开关接入后由桌面端托管）
   };
@@ -489,21 +488,26 @@ async function startBackend() {
 }
 startBackend().catch((e) => log("error", { where: "startBackend", msg: String(e) }));
 
-// ── Phase 5：Server酱³ 推送（持久订阅会话索引 + 静止判据实时推送 + 去重）──
-// 静止判据（实时、无延时）：phase ∈ {completedSuccess,error} 且 hasBackgroundWork!==true 且 sessionEnded===true。
-// sessionEnded 在"多轮接力"期间为 false，天然规避每轮刷屏；去重键 = sessionId|lastActivityAt。
+// ── Phase 5：Server酱³ 推送（持久订阅会话索引 + 实时推送 + 去重）──
+// 完成推送判据：phase ∈ {completedSuccess,error} 且 hasBackgroundWork!==true 且 sessionEnded===true。
+//   多轮接力期间 sessionEnded=false 天然不刷屏；去重键 = sessionId|lastActivityAt。
+// 请决策推送判据：会话摘要带 pendingInteraction（kind=permission 求确认 / userInput 求回答）
+//   或 pendingInteractionSummary 计数>0，出现瞬间即推；去重键 = sessionId|interactionId（同一请求多帧只推一次），回答/撤销后自动复位。
 const NOTIFY_STATE_FILE = path.join(HERE, "notify-state.json");
-let notifyState = { sent: {} };
-try { notifyState = JSON.parse(fs.readFileSync(NOTIFY_STATE_FILE, "utf8")); } catch {}
+let notifyState = { sent: {}, asks: {} };
+try {
+  const raw = JSON.parse(fs.readFileSync(NOTIFY_STATE_FILE, "utf8"));
+  notifyState = { sent: raw.sent || {}, asks: raw.asks || {} };
+} catch {}
 function saveNotifyState() {
   try { fs.writeFileSync(NOTIFY_STATE_FILE, JSON.stringify(notifyState)); } catch {}
 }
 function loadNotifyConfig() {
   try { return JSON.parse(fs.readFileSync(CFG.notifyConfigPath, "utf8")); } catch { return null; }
 }
-async function sendServerChan(cfg, title, short) {
+async function sendServerChan(cfg, title, short, desp) {
   const url = `https://${cfg.uid}.push.ft07.com/send/${cfg.sendKey}.send`;
-  const body = JSON.stringify({ title, desp: short, short });
+  const body = JSON.stringify({ title, desp: desp || short, short });
   const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
   const text = await res.text();
   log("notify-sent", { title: title.slice(0, 30), status: res.status, resp: text.slice(0, 160) });
@@ -512,24 +516,56 @@ async function sendServerChan(cfg, title, short) {
 function isQuiescent(s) {
   return (s.phase === "completedSuccess" || s.phase === "error") && s.hasBackgroundWork !== true && s.sessionEnded === true;
 }
+function pendingAskInfo(s) {
+  const pi = s.pendingInteraction;
+  if (pi && pi.interactionId) return { sig: "id:" + pi.interactionId, kind: pi.kind, toolName: pi.toolName };
+  const sum = s.pendingInteractionSummary; // 旧帧兼容：只有计数没有单项明细
+  if (sum && (sum.permissionCount || 0) + (sum.userInputCount || 0) > 0)
+    return { sig: `n:${sum.permissionCount || 0}:${sum.userInputCount || 0}`, kind: (sum.userInputCount || 0) > 0 ? "userInput" : "permission" };
+  return null;
+}
+function sessionDesp(s, extra) {
+  let d = `会话：${String(s.title || s.sessionId).slice(0, 40)}`;
+  if (extra) d += `\n${extra}`;
+  if (s.lastAssistantPreview) d += `\n— ${String(s.lastAssistantPreview).slice(0, 80)}`;
+  if (CFG.publicBaseUrl) d += `\n\n打开远控页面：${CFG.publicBaseUrl.replace(/\/$/, "")}/web-remote`;
+  return d;
+}
 let notifySeeded = false; // 初始快照只打底不推送，避免启动时把历史静止会话全推一遍
 function handleSessionsSnapshot(sessions) {
   const cfg = loadNotifyConfig();
   if (!cfg || !cfg.enabled) return;
+  const events = cfg.events || {};
   for (const s of sessions || []) {
     if (!s || !s.sessionId) continue;
+    // ① 请决策：出现即推、去重、回答后复位（与 phase 无关，阻塞中的会话往往仍在 running）
+    const ask = pendingAskInfo(s);
+    const prevAsk = notifyState.asks[s.sessionId];
+    if (!ask) {
+      if (prevAsk) { delete notifyState.asks[s.sessionId]; saveNotifyState(); log("notify-ask-cleared", { sessionId: s.sessionId }); }
+    } else if (prevAsk !== ask.sig) {
+      notifyState.asks[s.sessionId] = ask.sig;
+      saveNotifyState();
+      if (notifySeeded && events.ask !== false) {
+        const label = ask.kind === "permission" ? "请求权限确认" : ask.kind === "userInput" ? "有问题等你回答" : "等待你的决策";
+        const short = `会话：${String(s.title || s.sessionId).slice(0, 40)}`;
+        sendServerChan(cfg, `【智能体】${label}`, short, sessionDesp(s, ask.toolName ? `工具：${ask.toolName}` : null))
+          .catch((e) => log("notify-error", { msg: String(e) }));
+        log("notify-ask-sent", { sessionId: s.sessionId, kind: ask.kind, tool: ask.toolName || null });
+      }
+    }
+    // ② 完成 / 中断（静止判据）
     if (!isQuiescent(s)) continue;
     const key = `${s.sessionId}|${s.lastActivityAt || 0}`;
     if (!notifySeeded) { notifyState.sent[key] = true; continue; } // 打底：标记为已处理，不推送
     if (notifyState.sent[key]) continue;
-    if (s.phase === "error" && cfg.events && cfg.events.error === false) continue;
-    if (s.phase === "completedSuccess" && cfg.events && cfg.events.done === false) continue;
+    if (s.phase === "error" && events.error === false) continue;
+    if (s.phase === "completedSuccess" && events.done === false) continue;
     const label = s.phase === "error" ? "已中断" : "已完成";
-    const title = `【智能体】${label}`;
     const short = `会话：${String(s.title || s.sessionId).slice(0, 40)}`;
     notifyState.sent[key] = true;
     saveNotifyState();
-    sendServerChan(cfg, title, short).catch((e) => log("notify-error", { msg: String(e) }));
+    sendServerChan(cfg, `【智能体】${label}`, short, sessionDesp(s)).catch((e) => log("notify-error", { msg: String(e) }));
   }
 }
 // —— 桥的持久后端订阅（不依赖手机是否在线）——
@@ -559,6 +595,7 @@ function startNotifySubscription() {
     return id;
   };
   ws.addEventListener("open", () => {
+    log("notify-sub-open", {});
     // 事件订阅（页面同款）：onDynamicSessionsIndexFrame（102 EventListen），再走三步握手
     sendListen("zcode-agent", "onDynamicSessionsIndexFrame", { workspacePath: CFG.workspacePath });
     initId.v = sendRpc("zcode-agent", "helloConversationV4", []);
@@ -572,7 +609,7 @@ function startNotifySubscription() {
     try {
       const p = rpcParseFrame(b.subarray(13, 13 + len));
       const [tcode, rmid] = p.header || [];
-      if (CFG.debugAgent) log("notify-frame", { tcode, rmid });
+      if (CFG.debugAgent) log("notify-frame", { tcode, rmid, err: tcode === 202 || tcode === 203 ? JSON.stringify(p.body).slice(0, 300) : undefined });
       if (initId.v && rmid === initId.v) {
         const stage = initId.stage || "hello";
         if (stage === "hello") {
@@ -582,7 +619,7 @@ function startNotifySubscription() {
         }
         if (stage === "init") {
           initId.stage = "sub";
-          initId.v = sendRpc("zcode-agent", "subscribeSessionsIndexV4", [{ workspacePath: CFG.workspacePath, runtimePolicy: "existing-only" }]);
+          initId.v = sendRpc("zcode-agent", "subscribeSessionsIndexV4", [{ workspacePath: CFG.workspacePath, runtimePolicy: "start-if-needed" }]);
           log("notify-subscribed", { workspacePath: CFG.workspacePath, initOk: tcode === 201 });
           return;
         }
@@ -599,13 +636,19 @@ function startNotifySubscription() {
       }
       const delta = frame && frame.payload && frame.payload.deltas;
       if (Array.isArray(delta)) {
+        for (const d of delta) {
+          if (d && d.op === "session.removed" && d.sessionId && notifyState.asks[d.sessionId]) {
+            delete notifyState.asks[d.sessionId];
+            saveNotifyState();
+          }
+        }
         const sessions = delta.filter((d) => d && d.op === "session.upserted" && d.session).map((d) => d.session);
         if (sessions.length) handleSessionsSnapshot(sessions);
       }
     } catch {}
   });
-  ws.addEventListener("close", () => { log("notify-sub-closed", {}); setTimeout(startNotifySubscription, 5000); });
-  ws.addEventListener("error", () => {});
+  ws.addEventListener("close", (ev) => { log("notify-sub-closed", { code: ev.code, reason: String(ev.reason || "").slice(0, 120) }); setTimeout(startNotifySubscription, 5000); });
+  ws.addEventListener("error", (ev) => { log("notify-sub-error", { msg: String((ev && ev.message) || ev).slice(0, 200) }); });
 }
 
 // ── main ────────────────────────────────────────────────────────────────

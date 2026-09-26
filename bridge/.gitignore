@@ -1,0 +1,4 @@
+notify-state.json
+handshake_*.json
+sessions_index_dump.json
+logs/
