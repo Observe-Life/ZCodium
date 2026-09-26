@@ -100,7 +100,10 @@ function commandText(command, args) {
 
 function run(command, args, options = {}) {
   console.log(`[zcode] ${commandText(command, args)}`);
-  const result = spawnSync(command, args, {
+  // ZCodium fork patch: spawnSync on Windows cannot resolve bare "pnpm" (ENOENT); use pnpm.cmd.
+  const resolvedCommand =
+    process.platform === "win32" && /^(pnpm|npm|npx)$/.test(command) ? `${command}.cmd` : command;
+  const result = spawnSync(resolvedCommand, args, {
     cwd: root,
     stdio: "inherit",
     ...options,
