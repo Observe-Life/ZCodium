@@ -43,6 +43,9 @@ function loadConfig() {
     // 任务列表就地应答：后端（CLI）与桌面端的数据根不一致时，桥直接读桌面端的任务索引作答。
     tasksIndexPath: "D:\\ZCodium\\.zcodium\\v2\\tasks-index.sqlite",
     provider: "glm",
+    // Server酱³ 推送（沿用既有配置；enabled 由该文件控制）
+    notifyConfigPath: "C:\\Users\\Bingcan Lin\\AppData\\Local\\ZCode\\serverchan-notify.json",
+    notifyDebounceMs: 90000, // 静默期：任务进入终态后稳定这么久才推送（防多轮接力刷屏）
     spawnBackend: null, // 例如 { command:"node", args:["...zcode.cjs","--web",...] }（增强功能开关接入后由桌面端托管）
   };
   const cfgFile = process.env.ZCODIUM_BRIDGE_CONFIG || path.join(HERE, "bridge.config.json");
@@ -131,8 +134,7 @@ function rpcParseFrame(buf) {
 }
 
 // ── 任务列表就地应答（读桌面端任务索引）────────────────────────────────
-function queryTasks(indexPath, kind, workspacePath) {
-  const db = new DatabaseSync(indexPath, { readOnly: true });
+function queryTasks(indexPath, kind, workspacePath) {  const db = new DatabaseSync(indexPath, { readOnly: true });
   try {
     const where = ["workspace_key = ?", "provider = ?"];
     const params = [workspacePath, CFG.provider];
@@ -467,6 +469,64 @@ async function startBackend() {
 }
 startBackend().catch((e) => log("error", { where: "startBackend", msg: String(e) }));
 
+// ── Phase 5：Server酱³ 推送（轮询任务库 + 静默去抖 + 去重）─────────────
+const NOTIFY_STATE_FILE = path.join(HERE, "notify-state.json");
+let notifyState = { sent: {} }; // key: `${taskId}|${updatedAt}` → true
+try { notifyState = JSON.parse(fs.readFileSync(NOTIFY_STATE_FILE, "utf8")); } catch {}
+const pendingNotify = new Map(); // taskId → { since, status, updatedAt, title }
+function saveNotifyState() {
+  try { fs.writeFileSync(NOTIFY_STATE_FILE, JSON.stringify(notifyState)); } catch {}
+}
+function loadNotifyConfig() {
+  try { return JSON.parse(fs.readFileSync(CFG.notifyConfigPath, "utf8")); } catch { return null; }
+}
+async function sendServerChan(cfg, title, short) {
+  const url = `https://${cfg.uid}.push.ft07.com/send/${cfg.sendKey}.send`;
+  const body = JSON.stringify({ title, desp: short, short });
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body });
+  const text = await res.text();
+  log("notify-sent", { title: title.slice(0, 30), status: res.status, resp: text.slice(0, 160) });
+  return res.ok;
+}
+async function notifyTick() {
+  const cfg = loadNotifyConfig();
+  if (!cfg || !cfg.enabled || !cfg.uid || !cfg.sendKey) return;
+  let rows;
+  try {
+    const db = new DatabaseSync(CFG.tasksIndexPath, { readOnly: true });
+    rows = db.prepare("SELECT task_id, title, task_status, updated_at FROM tasks WHERE deleted = 0 AND archived = 0 ORDER BY updated_at DESC LIMIT 30").all();
+    db.close();
+  } catch (e) { return; }
+  const now = Date.now();
+  for (const r of rows) {
+    const status = String(r.task_status || "");
+    const terminal = status === "completed" || status === "error";
+    const key = `${r.task_id}|${r.updated_at}`;
+    if (!terminal) { pendingNotify.delete(r.task_id); continue; }
+    if (notifyState.sent[key]) { pendingNotify.delete(r.task_id); continue; }
+    const p = pendingNotify.get(r.task_id);
+    if (!p || p.updatedAt !== r.updated_at) {
+      pendingNotify.set(r.task_id, { since: now, status, updatedAt: r.updated_at, title: r.title });
+      continue;
+    }
+    if (now - p.since < CFG.notifyDebounceMs) continue;
+    if (status === "error" && cfg.events && cfg.events.error === false) { pendingNotify.delete(r.task_id); continue; }
+    if (status === "completed" && cfg.events && cfg.events.done === false) { pendingNotify.delete(r.task_id); continue; }
+    const label = status === "error" ? "已中断" : "已完成";
+    const title = `【智能体】${label}`;
+    const short = `会话：${String(r.title || r.task_id).slice(0, 40)}`;
+    const ok = await sendServerChan(cfg, title, short).catch((e) => { log("notify-error", { msg: String(e) }); return false; });
+    if (ok) { notifyState.sent[key] = true; saveNotifyState(); }
+    pendingNotify.delete(r.task_id);
+  }
+}
+function startNotifyLoop() {
+  const cfg = loadNotifyConfig();
+  if (!cfg || !cfg.enabled) { log("notify-disabled", { path: CFG.notifyConfigPath }); return; }
+  setInterval(() => { notifyTick().catch((e) => log("notify-tick-error", { msg: String(e) })); }, 10000);
+  log("notify-loop-started", { uid: cfg.uid });
+}
+
 // ── main ────────────────────────────────────────────────────────────────
 httpServer.listen(CFG.port, CFG.host, () => {
   console.log(`[bridge] http://${CFG.host}:${CFG.port}`);
@@ -474,5 +534,6 @@ httpServer.listen(CFG.port, CFG.host, () => {
   const demoReq = { headers: { host: `${CFG.host}:${CFG.port}` }, socket: { encrypted: false } };
   console.log(`  ${pairingUrl(demoReq)}`);
   console.log(`[bridge] 令牌即 URL 里的 hash 参数；日志: ${LOG_FILE}`);
+  startNotifyLoop();
 });
 process.on("SIGINT", () => { try { backendProc && backendProc.kill(); } catch {} process.exit(0); });
