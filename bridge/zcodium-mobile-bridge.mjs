@@ -46,6 +46,7 @@ function loadConfig() {
     // Server酱³ 推送（沿用既有配置；enabled 由该文件控制）
     notifyConfigPath: "C:\\Users\\Bingcan Lin\\AppData\\Local\\ZCode\\serverchan-notify.json",
     notifyDebounceMs: 90000, // 静默期：任务进入终态后稳定这么久才推送（防多轮接力刷屏）
+    debugAgent: false, // 临时：抓取 zcode-agent 请求与事件结构（BRIDGE_DEBUG_AGENT=1）
     spawnBackend: null, // 例如 { command:"node", args:["...zcode.cjs","--web",...] }（增强功能开关接入后由桌面端托管）
   };
   const cfgFile = process.env.ZCODIUM_BRIDGE_CONFIG || path.join(HERE, "bridge.config.json");
@@ -55,6 +56,7 @@ function loadConfig() {
   if (process.env.BRIDGE_SID) cfg.sid = process.env.BRIDGE_SID;
   if (process.env.BRIDGE_PUBLIC_BASE) cfg.publicBaseUrl = process.env.BRIDGE_PUBLIC_BASE;
   if (process.env.BRIDGE_DEBUG_FRAMES) cfg.debugFrames = process.env.BRIDGE_DEBUG_FRAMES === "1";
+  if (process.env.BRIDGE_DEBUG_AGENT) cfg.debugAgent = process.env.BRIDGE_DEBUG_AGENT === "1";
   if (process.env.BRIDGE_WORKSPACE) cfg.workspacePath = process.env.BRIDGE_WORKSPACE;
   if (process.env.BRIDGE_HOST) cfg.host = process.env.BRIDGE_HOST;
   if (!cfg.token) {
@@ -379,6 +381,21 @@ class WorkspaceRelay {
       if (buf.length < 13 + len) return;
       const body = buf.subarray(13, 13 + len);
       if (this.debugFrames) log("ws-res", { len: body.length, head: body.subarray(0, 24).toString("hex") });
+      if (CFG.debugAgent && body.length > 13) {
+        try {
+          const p = rpcParseFrame(body);
+          const [tc] = p.header || [];
+          if (tc === 204) {
+            const s = JSON.stringify(p.body);
+            if (s.includes("sessions-index")) {
+              fs.writeFileSync(path.join(HERE, "sessions_index_dump.json"), s);
+              log("agent-event", { head: JSON.stringify(p.header), dumped: s.length });
+            } else {
+              log("agent-event", { head: JSON.stringify(p.header), body: s.slice(0, 700) });
+            }
+          }
+        } catch {}
+      }
       this.toPage(1, body); // 持久层只向上传 Regular，统一以 Regular 转发（含后端的 Control/initialize 载荷）
     });
     ws.addEventListener("close", () => this.teardown("backend-close"));
@@ -395,6 +412,9 @@ class WorkspaceRelay {
       if (type === 1) { // Regular：任务列表就地应答，其余转给后端；均立即回 Ack
         this.lastPageId = Math.max(this.lastPageId, id);
         if (this.debugFrames) log("ws-req", { len: body.length, head: body.subarray(0, 24).toString("hex") });
+        if (CFG.debugAgent) {
+          try { const p = rpcParseFrame(body); const [tc, rid, ch, me] = p.header || []; if (ch === "zcode-agent") log("agent-req", { me, args: JSON.stringify(p.body).slice(0, 300) }); } catch {}
+        }
         if (!this.tryLocalTaskList(body)) this.toBackend(body);
         this.toPage(3, Buffer.alloc(0), id);
         return;
@@ -469,11 +489,12 @@ async function startBackend() {
 }
 startBackend().catch((e) => log("error", { where: "startBackend", msg: String(e) }));
 
-// ── Phase 5：Server酱³ 推送（轮询任务库 + 静默去抖 + 去重）─────────────
+// ── Phase 5：Server酱³ 推送（持久订阅会话索引 + 静止判据实时推送 + 去重）──
+// 静止判据（实时、无延时）：phase ∈ {completedSuccess,error} 且 hasBackgroundWork!==true 且 sessionEnded===true。
+// sessionEnded 在"多轮接力"期间为 false，天然规避每轮刷屏；去重键 = sessionId|lastActivityAt。
 const NOTIFY_STATE_FILE = path.join(HERE, "notify-state.json");
-let notifyState = { sent: {} }; // key: `${taskId}|${updatedAt}` → true
+let notifyState = { sent: {} };
 try { notifyState = JSON.parse(fs.readFileSync(NOTIFY_STATE_FILE, "utf8")); } catch {}
-const pendingNotify = new Map(); // taskId → { since, status, updatedAt, title }
 function saveNotifyState() {
   try { fs.writeFileSync(NOTIFY_STATE_FILE, JSON.stringify(notifyState)); } catch {}
 }
@@ -488,43 +509,67 @@ async function sendServerChan(cfg, title, short) {
   log("notify-sent", { title: title.slice(0, 30), status: res.status, resp: text.slice(0, 160) });
   return res.ok;
 }
-async function notifyTick() {
+function isQuiescent(s) {
+  return (s.phase === "completedSuccess" || s.phase === "error") && s.hasBackgroundWork !== true && s.sessionEnded === true;
+}
+function handleSessionsSnapshot(sessions) {
   const cfg = loadNotifyConfig();
-  if (!cfg || !cfg.enabled || !cfg.uid || !cfg.sendKey) return;
-  let rows;
-  try {
-    const db = new DatabaseSync(CFG.tasksIndexPath, { readOnly: true });
-    rows = db.prepare("SELECT task_id, title, task_status, updated_at FROM tasks WHERE deleted = 0 AND archived = 0 ORDER BY updated_at DESC LIMIT 30").all();
-    db.close();
-  } catch (e) { return; }
-  const now = Date.now();
-  for (const r of rows) {
-    const status = String(r.task_status || "");
-    const terminal = status === "completed" || status === "error";
-    const key = `${r.task_id}|${r.updated_at}`;
-    if (!terminal) { pendingNotify.delete(r.task_id); continue; }
-    if (notifyState.sent[key]) { pendingNotify.delete(r.task_id); continue; }
-    const p = pendingNotify.get(r.task_id);
-    if (!p || p.updatedAt !== r.updated_at) {
-      pendingNotify.set(r.task_id, { since: now, status, updatedAt: r.updated_at, title: r.title });
-      continue;
-    }
-    if (now - p.since < CFG.notifyDebounceMs) continue;
-    if (status === "error" && cfg.events && cfg.events.error === false) { pendingNotify.delete(r.task_id); continue; }
-    if (status === "completed" && cfg.events && cfg.events.done === false) { pendingNotify.delete(r.task_id); continue; }
-    const label = status === "error" ? "已中断" : "已完成";
+  if (!cfg || !cfg.enabled) return;
+  for (const s of sessions || []) {
+    if (!s || !s.sessionId) continue;
+    if (!isQuiescent(s)) continue;
+    const key = `${s.sessionId}|${s.lastActivityAt || 0}`;
+    if (notifyState.sent[key]) continue;
+    if (s.phase === "error" && cfg.events && cfg.events.error === false) continue;
+    if (s.phase === "completedSuccess" && cfg.events && cfg.events.done === false) continue;
+    const label = s.phase === "error" ? "已中断" : "已完成";
     const title = `【智能体】${label}`;
-    const short = `会话：${String(r.title || r.task_id).slice(0, 40)}`;
-    const ok = await sendServerChan(cfg, title, short).catch((e) => { log("notify-error", { msg: String(e) }); return false; });
-    if (ok) { notifyState.sent[key] = true; saveNotifyState(); }
-    pendingNotify.delete(r.task_id);
+    const short = `会话：${String(s.title || s.sessionId).slice(0, 40)}`;
+    notifyState.sent[key] = true;
+    saveNotifyState();
+    sendServerChan(cfg, title, short).catch((e) => log("notify-error", { msg: String(e) }));
   }
 }
-function startNotifyLoop() {
+// —— 桥的持久后端订阅（不依赖手机是否在线）——
+let notifySub = null;
+function startNotifySubscription() {
   const cfg = loadNotifyConfig();
   if (!cfg || !cfg.enabled) { log("notify-disabled", { path: CFG.notifyConfigPath }); return; }
-  setInterval(() => { notifyTick().catch((e) => log("notify-tick-error", { msg: String(e) })); }, 10000);
-  log("notify-loop-started", { uid: cfg.uid });
+  const ws = new WebSocket(CFG.backendWs);
+  ws.binaryType = "arraybuffer";
+  notifySub = ws;
+  let rid = 0;
+  const sendRpc = (channel, method, args) => {
+    const id = ++rid;
+    const body = Buffer.concat([rpcSerialize([100, id, channel, method]), rpcSerialize(args === undefined ? null : args)]);
+    const h = Buffer.alloc(13);
+    h.writeUInt8(1, 0); h.writeUInt32BE(0, 1); h.writeUInt32BE(0, 5); h.writeUInt32BE(body.length, 9);
+    ws.send(Buffer.concat([h, body]));
+  };
+  ws.addEventListener("open", () => {
+    sendRpc("zcode-agent", "initializeConversationV4", [{ kind: "clientHello", protocolVersion: 3, clientId: "zcodium-bridge-notify", clientKind: "web", appVersion: "bridge", capabilities: {} }]);
+    sendRpc("zcode-agent", "subscribeSessionsIndexV4", [{ workspacePath: CFG.workspacePath, runtimePolicy: "existing-only" }]);
+    log("notify-subscribed", { workspacePath: CFG.workspacePath });
+  });
+  ws.addEventListener("message", (ev) => {
+    const b = Buffer.from(ev.data);
+    if (b.length < 13) return;
+    const type = b.readUInt8(0);
+    if (type !== 1) return;
+    const len = b.readUInt32BE(9);
+    try {
+      const p = rpcParseFrame(b.subarray(13, 13 + len));
+      const [tcode] = p.header || [];
+      if (tcode !== 204) return;
+      const frame = p.body && p.body.frame;
+      const snap = frame && frame.payload && frame.payload.snapshot;
+      if (snap && Array.isArray(snap.sessions)) handleSessionsSnapshot(snap.sessions);
+      const delta = frame && frame.payload && frame.payload.delta;
+      if (delta && Array.isArray(delta.sessions)) handleSessionsSnapshot(delta.sessions);
+    } catch {}
+  });
+  ws.addEventListener("close", () => { log("notify-sub-closed", {}); setTimeout(startNotifySubscription, 5000); });
+  ws.addEventListener("error", () => {});
 }
 
 // ── main ────────────────────────────────────────────────────────────────
@@ -534,6 +579,6 @@ httpServer.listen(CFG.port, CFG.host, () => {
   const demoReq = { headers: { host: `${CFG.host}:${CFG.port}` }, socket: { encrypted: false } };
   console.log(`  ${pairingUrl(demoReq)}`);
   console.log(`[bridge] 令牌即 URL 里的 hash 参数；日志: ${LOG_FILE}`);
-  startNotifyLoop();
+  startNotifySubscription();
 });
 process.on("SIGINT", () => { try { backendProc && backendProc.kill(); } catch {} process.exit(0); });
