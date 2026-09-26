@@ -37,7 +37,7 @@ interface MobileRemoteSectionProps {
 type BridgeStatus = "unknown" | "running" | "stopped";
 
 export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRemoteSectionProps) {
-  const intl = useZCodeIntl();
+  const { intl } = useZCodeIntl();
   const [status, setStatus] = useState<BridgeStatus>("unknown");
   const [pairingUrl, setPairingUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -61,17 +61,18 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
   // 状态与配对 URL：直接问桥的 /pair（桥由 supervisor 拉起后回 pairingUrl，
   // 内含 LAN 地址与令牌，主进程无需新增 IPC）。5s 轮询反映自动起停结果。
   useEffect(() => {
-    if (!enabled || !config?.token) {
+    const token = config?.token;
+    if (!enabled || !token) {
       setStatus("stopped");
       setPairingUrl(null);
       return;
     }
+    const port = config?.port ?? DEFAULT_BRIDGE_PORT;
     let cancelled = false;
     const probe = async () => {
       try {
-        const port = config.port ?? DEFAULT_BRIDGE_PORT;
         const res = await fetch(
-          `http://127.0.0.1:${port}/pair?token=${encodeURIComponent(config.token)}`,
+          `http://127.0.0.1:${port}/pair?token=${encodeURIComponent(token)}`,
           { signal: AbortSignal.timeout(2_500) },
         );
         const data: { pairingUrl?: string } | null = res.ok ? await res.json() : null;
