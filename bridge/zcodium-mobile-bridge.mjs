@@ -38,6 +38,7 @@ function loadConfig() {
     workspaceLabel: "ZCodium",
     publicBaseUrl: null, // 例如 https://xx.de5.net（隧道时设置；缺省按请求 Host）
     logDir: path.join(HERE, "logs"),
+    debugFrames: false,
     spawnBackend: null, // 例如 { command:"node", args:["...zcode.cjs","--web",...] }（增强功能开关接入后由桌面端托管）
   };
   const cfgFile = process.env.ZCODIUM_BRIDGE_CONFIG || path.join(HERE, "bridge.config.json");
@@ -46,6 +47,9 @@ function loadConfig() {
   if (process.env.BRIDGE_TOKEN) cfg.token = process.env.BRIDGE_TOKEN;
   if (process.env.BRIDGE_SID) cfg.sid = process.env.BRIDGE_SID;
   if (process.env.BRIDGE_PUBLIC_BASE) cfg.publicBaseUrl = process.env.BRIDGE_PUBLIC_BASE;
+  if (process.env.BRIDGE_DEBUG_FRAMES) cfg.debugFrames = process.env.BRIDGE_DEBUG_FRAMES === "1";
+  if (process.env.BRIDGE_WORKSPACE) cfg.workspacePath = process.env.BRIDGE_WORKSPACE;
+  if (process.env.BRIDGE_HOST) cfg.host = process.env.BRIDGE_HOST;
   if (!cfg.token) {
     cfg.token = crypto.randomBytes(24).toString("base64url");
     console.log(`[bridge] 未配置 token，本次生成：${cfg.token}`);
@@ -180,8 +184,9 @@ function checkToken(req, url) {
   return false;
 }
 function pairingUrl(req) {
-  const base = CFG.publicBaseUrl || `https://${req.headers.host}`;
-  return `${base.replace(/\/$/, "")}/remote/v4?sid=${encodeURIComponent(CFG.sid)}&hash=${encodeURIComponent(CFG.token)}&t=${Date.now()}&mid=${crypto.randomUUID()}&name=ZCodium&app_version=3.14.3`;
+  const base = (CFG.publicBaseUrl || `https://${req.headers.host}`).replace(/\/$/, "");
+  // 带 token 时页面自动走 /web-remote 流程；relayOrigin 显式给出以确保 REST/WS 都指回本桥。
+  return `${base}/web-remote?remoteControlToken=${encodeURIComponent(CFG.token)}&relayOrigin=${encodeURIComponent(base)}`;
 }
 function workspacesPayload() {
   return [{ workspaceKey: "ws-local", workspacePath: CFG.workspacePath, label: CFG.workspaceLabel, kind: "local" }];
@@ -197,8 +202,8 @@ const httpServer = http.createServer((req, res) => {
     if (!checkToken(req, url)) return json(res, 401, { error: "unauthorized" });
     return json(res, 200, { pairingUrl: pairingUrl(req), sid: CFG.sid });
   }
-  // 静态页面
-  if (p === "/remote/v4" || p === "/remote/v4/" || p === "/remote/v4/index.html") {
+  // 静态页面（/remote/v4 与 /web-remote 两个入口都供同一份 SPA；页面会在带 token 时自动走 /web-remote 流程）
+  if (p === "/remote/v4" || p === "/remote/v4/" || p === "/remote/v4/index.html" || p === "/web-remote" || p === "/web-remote/") {
     const idx = findAsset("index.html");
     if (!idx) return json(res, 500, { error: "snapshot missing" });
     res.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
@@ -217,9 +222,24 @@ const httpServer = http.createServer((req, res) => {
   }
   if ((m = p.match(/^\/api\/remote-control\/windows\/([^/]+)\/workspace-bridge$/)) && req.method === "POST") {
     if (m[1] !== CFG.token) return json(res, 401, { error: "unauthorized" });
-    const base = CFG.publicBaseUrl || `${req.socket.encrypted ? "wss" : "ws"}://${req.headers.host}`;
-    const wsBase = base.replace(/^http/, "ws").replace(/\/$/, "");
-    return json(res, 200, { wsUrl: `${wsBase}/ws/remote-control/window/${CFG.token}` });
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      let workspaceKey = "ws-local";
+      try { const b = JSON.parse(body || "{}"); if (b.workspaceKey) workspaceKey = b.workspaceKey; } catch {}
+      const base = CFG.publicBaseUrl || `${req.socket.encrypted ? "wss" : "ws"}://${req.headers.host}`;
+      const wsBase = base.replace(/^http/, "ws").replace(/\/$/, "");
+      return json(res, 200, {
+        wsUrl: `${wsBase}/ws/remote-control/workspace/${CFG.token}`,
+        bridgeSessionId: "bridge-" + crypto.randomUUID(),
+        bridgeGeneration: 1,
+        kind: "local",
+        workspaceKey,
+        workspacePath: CFG.workspacePath,
+        initialTaskId: null,
+      });
+    });
+    return;
   }
   if ((m = p.match(/^\/api\/remote-control\/windows\/([^/]+)\/mobile-view-state$/)) && req.method === "POST") {
     if (m[1] !== CFG.token) return json(res, 401, { error: "unauthorized" });
@@ -241,14 +261,14 @@ const httpServer = http.createServer((req, res) => {
   json(res, 404, { error: "no route", path: p });
 });
 
-// ── WS 升级：手机页面接入 ───────────────────────────────────────────────
-const sessionsBySid = new Map(); // sid → RelaySession
+// ── WS 升级：区分「窗口 socket」与「工作区 socket」两路 ────────────────
 httpServer.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url, "http://x");
-  const m = url.pathname.match(/^\/ws\/remote-control\/window\/([^/]+)$/) || url.pathname.match(/^\/ws$/);
-  if (!m) { socket.destroy(); return; }
-  const tokenInPath = m[1];
-  if (tokenInPath && tokenInPath !== CFG.token) { socket.destroy(); return; }
+  const winM = url.pathname.match(/^\/ws\/remote-control\/window\/([^/]+)$/);
+  const wsM = url.pathname.match(/^\/ws\/remote-control\/workspace\/([^/]+)$/);
+  if (!winM && !wsM) { socket.destroy(); return; }
+  const tokenInPath = (winM || wsM)[1];
+  if (tokenInPath !== CFG.token) { socket.destroy(); return; }
   const key = req.headers["sec-websocket-key"];
   if (!key) { socket.destroy(); return; }
   socket.write(
@@ -259,172 +279,101 @@ httpServer.on("upgrade", (req, socket, head) => {
   socket.setNoDelay(true);
   const conn = new WsConn(socket);
   if (head && head.length) conn._feed(head);
-  new RelaySession(conn, url);
+  if (winM) new WindowSocket(conn);
+  else new WorkspaceRelay(conn);
 });
 
-// ── 中继会话：握手 → 桥接 → rpc-frame 直通 ─────────────────────────────
-class RelaySession {
-  constructor(conn, url) {
+// ── 窗口 socket：/web-remote token 流程的第一条连接，连上即回 window-control-ready ──
+class WindowSocket {
+  constructor(conn) {
     this.conn = conn;
-    this.sid = url.searchParams.get("sid") || CFG.sid;
-    this.nonce = crypto.randomBytes(16).toString("hex");
-    this.authed = false;
-    this.bridgeSessionId = null;
-    this.outSeq = 0;
-    this.outMessageSeq = 0;
-    this.backend = null; // WebSocket
-    this.pendingToBackend = [];
+    this.windowControlSessionId = "wcs-" + crypto.randomBytes(6).toString("hex");
+    this.mobileConnectionId = "mc-" + crypto.randomBytes(8).toString("hex");
+    log("window-open", { wcs: this.windowControlSessionId });
+    conn.sendText(JSON.stringify({
+      type: "window-control-ready",
+      windowControlSessionId: this.windowControlSessionId,
+      mobileConnectionId: this.mobileConnectionId,
+    }));
+    conn.onmessage = (msg) => { log("window-recv", { d: String(msg).slice(0, 240) }); };
+    conn.onclose = () => log("window-close", {});
+  }
+}
+
+// ── 工作区 socket：持久层（id/ack/KeepAlive）服务端 + 后端 /ws 直通 ─────
+class WorkspaceRelay {
+  constructor(conn) {
+    this.conn = conn;
+    this.backend = null;
+    this.lastPageId = 0; // 页面发来的最大 id，用于回 ack
+    this.outId = 0;      // 桥发往页面的 id
     this.dead = false;
+    this.debugFrames = !!CFG.debugFrames;
+    log("workspace-open", {});
 
-    const prev = sessionsBySid.get(this.sid);
-    if (prev && prev !== this) { try { prev.sendEnvelope({ type: "error", code: "KICKED" }); prev.teardown("kicked"); } catch {} }
-    sessionsBySid.set(this.sid, this);
-    log("session-open", { sid: this.sid });
-
-    this.sendEnvelope({ type: "auth_challenge", nonce: this.nonce });
-    this.heartbeat = setInterval(() => { try { this.conn._raw(wsFrame(Buffer.alloc(0), 0x9)); } catch {} }, 25000);
-
-    conn.onmessage = (msg) => {
-      if (typeof msg !== "string") return this.onBackendFacingBinary?.(msg);
-      let env; try { env = JSON.parse(msg); } catch { return; }
-      this.handleEnvelope(env).catch((e) => log("error", { where: "handleEnvelope", msg: String(e) }));
-    };
-    conn.onclose = () => this.teardown("phone-close");
-  }
-
-  sendEnvelope(obj) { this.conn.sendText(JSON.stringify(obj)); }
-  sendData(payload) { this.sendEnvelope({ type: "data", payload, server_ts: Date.now() }); }
-
-  async handleEnvelope(env) {
-    if (env.type === "auth_response") {
-      const expect = calcProof(CFG.token, this.nonce, "terminal", env.device_sid || this.sid);
-      if (env.proof !== expect) {
-        log("auth-fail", { sid: env.device_sid });
-        this.sendEnvelope({ type: "error", code: "AUTH_FAILED" });
-        return this.teardown("auth-fail");
-      }
-      this.authed = true;
-      this.sendEnvelope({ type: "auth_ack", pair_status: "paired" });
-      log("auth-ok", { sid: this.sid });
-      return;
-    }
-    if (env.type === "auth_init") return; // 容忍
-    if (env.type !== "data" || !env.payload) return;
-    const p = env.payload;
-    const zt = p.zcode_type;
-    log("recv", { zt, requestId: p.requestId, bridgeSessionId: p.bridgeSessionId });
-
-    if (zt === "bootstrap-request") {
-      return this.sendData({
-        zcode_type: "bootstrap-response", requestId: p.requestId, success: true,
-        result: {
-          windowControlSessionId: "win-" + crypto.randomBytes(4).toString("hex"),
-          workspaces: workspacesPayload(), tasks: tasksPayload(),
-          initialViewState: { activeWorkspaceKey: "ws-local", updatedAt: Date.now() },
-          mobileViewState: { updatedAt: Date.now() },
-        },
-      });
-    }
-    if (zt === "workspace-list-request") {
-      return this.sendData({
-        zcode_type: "workspace-list-response", requestId: p.requestId, success: true,
-        result: { workspaces: workspacesPayload(), activeWorkspaceKey: "ws-local" },
-      });
-    }
-    if (zt === "workspace-bridge-open") {
-      this.bridgeSessionId = p.bridgeSessionId;
-      this.connectBackend(p);
-      return;
-    }
-    if (zt === "rpc-frame") {
-      const body = Buffer.from(p.dataBase64 || "", "base64");
-      if (p.checksum && p.checksum.algorithm === "crc32" && p.checksum.value !== crc32(body)) {
-        log("fault", { why: "crc32-mismatch", want: p.checksum.value, got: crc32(body) });
-        return this.sendData({ zcode_type: "rpc-transport-fault", bridgeSessionId: p.bridgeSessionId, reason: "checksum" });
-      }
-      this.sendData({ zcode_type: "rpc-frame-ack", bridgeSessionId: p.bridgeSessionId, bridgeGeneration: p.bridgeGeneration, ackMessageSeq: p.messageSeq ?? p.seq });
-      this.toBackend(body);
-      return;
-    }
-    if (zt === "rpc-frame-ack") return; // 手机对下行帧的确认：直通模式无需处理
-    log("unknown-envelope", { zt });
-  }
-
-  connectBackend(openEnv) {
-    if (this.backend) return;
     const ws = new WebSocket(CFG.backendWs);
     ws.binaryType = "arraybuffer";
     this.backend = ws;
-    ws.addEventListener("open", () => {
-      this.sendData({
-        zcode_type: "workspace-bridge-ready",
-        requestId: openEnv.requestId,
-        bridgeSessionId: openEnv.bridgeSessionId,
-        bridgeGeneration: openEnv.bridgeGeneration,
-        bridge: {
-          bridgeSessionId: openEnv.bridgeSessionId,
-          kind: "local",
-          workspaceKey: openEnv.workspaceKey || "ws-local",
-          workspacePath: CFG.workspacePath,
-          initialTaskId: openEnv.taskId,
-        },
-      });
-      log("backend-open", {});
-      for (const b of this.pendingToBackend.splice(0)) this.writeBackend(b);
-    });
+    ws.addEventListener("open", () => log("backend-open", {}));
     ws.addEventListener("message", (ev) => {
       const buf = Buffer.from(ev.data);
       if (buf.length < 13) return;
-      const type = buf.readUInt8(0);
       const len = buf.readUInt32BE(9);
-      if (type !== 1 || buf.length < 13 + len) { log("backend-frame", { type, len, actual: buf.length }); if (type !== 1) return; }
+      if (buf.length < 13 + len) return;
       const body = buf.subarray(13, 13 + len);
-      this.toPhoneFrame(body);
+      if (this.debugFrames) log("ws-res", { len: body.length, head: body.subarray(0, 24).toString("hex") });
+      this.toPage(1, body); // 持久层只向上传 Regular，统一以 Regular 转发（含后端的 Control/initialize 载荷）
     });
+    ws.addEventListener("close", () => this.teardown("backend-close"));
     ws.addEventListener("error", () => log("backend-error", {}));
-    ws.addEventListener("close", (ev) => {
-      log("backend-close", { code: ev.code });
-      this.sendData({ zcode_type: "workspace-bridge-error", requestId: openEnv.requestId, bridgeSessionId: openEnv.bridgeSessionId, error: "backend-closed" });
-      this.teardown("backend-close");
-    });
-  }
 
-  writeBackend(body) {
+    conn.onmessage = (msg) => {
+      if (typeof msg === "string") { log("workspace-text", { d: msg.slice(0, 160) }); return; }
+      const buf = Buffer.from(msg);
+      if (buf.length < 13) return;
+      const type = buf.readUInt8(0);
+      const id = buf.readUInt32BE(1);
+      const len = buf.readUInt32BE(9);
+      const body = buf.subarray(13, 13 + len);
+      if (type === 1) { // Regular：转给后端 + 立即回 Ack 满足页面持久层
+        this.lastPageId = Math.max(this.lastPageId, id);
+        if (this.debugFrames) log("ws-req", { len: body.length, head: body.subarray(0, 24).toString("hex") });
+        this.toBackend(body);
+        this.toPage(3, Buffer.alloc(0), id);
+        return;
+      }
+      if (type === 9) { this.toPage(9, Buffer.alloc(0)); return; } // KeepAlive → 回 KeepAlive
+      if (type === 3) return; // 页面对桥下行帧的 Ack：忽略
+      if (type === 5) return this.teardown("page-disconnect");
+      log("workspace-frame", { type, len });
+    };
+    conn.onclose = () => this.teardown("page-close");
+  }
+  toBackend(body) {
+    if (!this.backend || this.backend.readyState !== 1) return;
     const head = Buffer.alloc(13);
-    head.writeUInt8(1, 0); // Regular
-    head.writeUInt32BE(0, 1); head.writeUInt32BE(0, 5);
+    head.writeUInt8(1, 0);
+    head.writeUInt32BE(0, 1);
+    head.writeUInt32BE(0, 5);
     head.writeUInt32BE(body.length, 9);
     this.backend.send(Buffer.concat([head, body]));
   }
-  toBackend(body) {
-    if (this.backend && this.backend.readyState === 1) this.writeBackend(body);
-    else this.pendingToBackend.push(body);
+  toPage(type, body, ackOverride) {
+    if (this.dead) return;
+    this.outId += 1;
+    const head = Buffer.alloc(13);
+    head.writeUInt8(type, 0);
+    head.writeUInt32BE(this.outId, 1);
+    head.writeUInt32BE(ackOverride ?? this.lastPageId, 5);
+    head.writeUInt32BE(body.length, 9);
+    this.conn.sendBinary(Buffer.concat([head, body]));
   }
-
-  toPhoneFrame(body) {
-    this.outSeq += 1; this.outMessageSeq += 1;
-    this.sendData({
-      zcode_type: "rpc-frame",
-      bridgeSessionId: this.bridgeSessionId,
-      bridgeGeneration: 1,
-      seq: this.outSeq,
-      messageSeq: this.outMessageSeq,
-      fragmentIndex: 0,
-      fragmentCount: 1,
-      messageBytes: body.length,
-      checksum: { algorithm: "crc32", value: crc32(body) },
-      dataBase64: body.toString("base64"),
-    });
-  }
-
   teardown(why) {
     if (this.dead) return;
     this.dead = true;
-    clearInterval(this.heartbeat);
-    if (sessionsBySid.get(this.sid) === this) sessionsBySid.delete(this.sid);
     try { this.backend && this.backend.close(); } catch {}
     try { this.conn.close(1000); } catch {}
-    log("session-close", { why });
+    log("workspace-close", { why });
   }
 }
 
