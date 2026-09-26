@@ -1,9 +1,0 @@
-{"t":1790410820677,"kind":"session-open","d":"{\"sid\":\"d_probe\"}"}
-{"t":1790410820683,"kind":"auth-ok","d":"{\"sid\":\"d_probe\"}"}
-{"t":1790410820684,"kind":"recv","d":"{\"zt\":\"bootstrap-request\",\"requestId\":\"req-b93de276-799e-48a2-8457-9006bd558cac\"}"}
-{"t":1790410820685,"kind":"recv","d":"{\"zt\":\"workspace-bridge-open\",\"requestId\":\"req-f5b68fb3-bf37-45b5-a8d0-dba7c711f4ce\",\"bridgeSessionId\":\"bridge-probe-8639d924-9a10-48ef-8df2-0dcb5ae42b11\"}"}
-{"t":1790410820705,"kind":"backend-open","d":"{}"}
-{"t":1790410820707,"kind":"recv","d":"{\"zt\":\"rpc-frame\",\"bridgeSessionId\":\"bridge-probe-8639d924-9a10-48ef-8df2-0dcb5ae42b11\"}"}
-{"t":1790410820920,"kind":"session-close","d":"{\"why\":\"phone-close\"}"}
-{"t":1790410820923,"kind":"backend-error","d":"{}"}
-{"t":1790410820923,"kind":"backend-close","d":"{\"code\":1006}"}

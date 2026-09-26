@@ -1,0 +1,2 @@
+bridge/remote_v4/** -text
+bridge/*.mjs text eol=lf
