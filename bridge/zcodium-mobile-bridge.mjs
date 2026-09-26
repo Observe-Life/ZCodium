@@ -18,6 +18,7 @@
  */
 import http from "node:http";
 import crypto from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +40,9 @@ function loadConfig() {
     publicBaseUrl: null, // 例如 https://xx.de5.net（隧道时设置；缺省按请求 Host）
     logDir: path.join(HERE, "logs"),
     debugFrames: false,
+    // 任务列表就地应答：后端（CLI）与桌面端的数据根不一致时，桥直接读桌面端的任务索引作答。
+    tasksIndexPath: "D:\\ZCodium\\.zcodium\\v2\\tasks-index.sqlite",
+    provider: "glm",
     spawnBackend: null, // 例如 { command:"node", args:["...zcode.cjs","--web",...] }（增强功能开关接入后由桌面端托管）
   };
   const cfgFile = process.env.ZCODIUM_BRIDGE_CONFIG || path.join(HERE, "bridge.config.json");
@@ -87,6 +91,57 @@ function crc32(buf) {
 // ── proof 计算（与页面 bundle H2t 一致）─────────────────────────────────
 function calcProof(hash, nonce, role, sid) {
   return crypto.createHmac("sha256", hash).update(`${nonce}|${role}|${sid}`).digest("base64url");
+}
+
+// ── 内联 RPC 编解码（tag: 0 null/1 string/2,3 binary/4 array/5 object/6 int；LEB128）──
+function writeVarint(out, v) {
+  if (v === 0) { out.push(0); return; }
+  let uv = BigInt(v < 0 ? 0 : v);
+  while (uv > 0n) { let b = Number(uv & 0x7fn); uv >>= 7n; if (uv > 0n) b |= 0x80; out.push(b); }
+}
+function readVarint(buf, pos) {
+  let value = 0n, shift = 0n, i = pos;
+  for (;;) { const b = buf[i++]; value |= BigInt(b & 0x7f) << shift; if ((b & 0x80) === 0) break; shift += 7n; if (i - pos > 10) throw new Error("varint"); }
+  return { value: Number(value), next: i };
+}
+function rpcSerialize(value) { const out = []; rpcSer(value, out); return Buffer.from(out); }
+function rpcSer(v, out) {
+  if (v === null || v === undefined) { out.push(0); return; }
+  if (typeof v === "number") { out.push(6); writeVarint(out, v); return; }
+  if (typeof v === "string") { const b = Buffer.from(v, "utf8"); out.push(1); writeVarint(out, b.length); out.push(...b); return; }
+  if (Buffer.isBuffer(v) || v instanceof Uint8Array) { out.push(2); writeVarint(out, v.length); out.push(...v); return; }
+  if (Array.isArray(v)) { out.push(4); writeVarint(out, v.length); for (const it of v) rpcSer(it, out); return; }
+  if (typeof v === "object") { const b = Buffer.from(JSON.stringify(v), "utf8"); out.push(5); writeVarint(out, b.length); out.push(...b); return; }
+  out.push(0);
+}
+function rpcDeserialize(buf, pos = 0) {
+  const tag = buf[pos++];
+  if (tag === 0) return { value: null, next: pos };
+  if (tag === 6) { const r = readVarint(buf, pos); return { value: r.value, next: r.next }; }
+  if (tag === 1) { const l = readVarint(buf, pos); return { value: buf.subarray(l.next, l.next + l.value).toString("utf8"), next: l.next + l.value }; }
+  if (tag === 2 || tag === 3) { const l = readVarint(buf, pos); return { value: Buffer.from(buf.subarray(l.next, l.next + l.value)), next: l.next + l.value }; }
+  if (tag === 4) { const n = readVarint(buf, pos); let i = n.next; const arr = []; for (let k = 0; k < n.value; k++) { const r = rpcDeserialize(buf, i); arr.push(r.value); i = r.next; } return { value: arr, next: i }; }
+  if (tag === 5) { const l = readVarint(buf, pos); return { value: JSON.parse(buf.subarray(l.next, l.next + l.value).toString("utf8")), next: l.next + l.value }; }
+  throw new Error("bad tag " + tag);
+}
+function rpcParseFrame(buf) {
+  const h = rpcDeserialize(buf, 0);
+  const b = h.next >= buf.length ? { value: undefined } : rpcDeserialize(buf, h.next);
+  return { header: h.value, body: b.value };
+}
+
+// ── 任务列表就地应答（读桌面端任务索引）────────────────────────────────
+function queryTasks(indexPath, kind, workspacePath) {
+  const db = new DatabaseSync(indexPath, { readOnly: true });
+  try {
+    const where = ["workspace_key = ?", "provider = ?"];
+    const params = [workspacePath, CFG.provider];
+    if (kind === "listTasks") { where.push("pinned = 0", "archived = 0", "deleted = 0"); }
+    if (kind === "listPinnedTasks") { where.push("pinned = 1", "archived = 0", "deleted = 0"); }
+    if (kind === "listArchivedTasks") { where.push("archived = 1"); }
+    const rows = db.prepare(`SELECT meta_json FROM tasks WHERE ${where.join(" AND ")} ORDER BY updated_at DESC`).all(...params);
+    return rows.map((r) => { try { return JSON.parse(r.meta_json); } catch { return null; } }).filter(Boolean);
+  } finally { try { db.close(); } catch {} }
 }
 
 // ── 极简 WebSocket 服务器（RFC6455，文本帧为主，支持分片/ping/close）────
@@ -335,10 +390,10 @@ class WorkspaceRelay {
       const id = buf.readUInt32BE(1);
       const len = buf.readUInt32BE(9);
       const body = buf.subarray(13, 13 + len);
-      if (type === 1) { // Regular：转给后端 + 立即回 Ack 满足页面持久层
+      if (type === 1) { // Regular：任务列表就地应答，其余转给后端；均立即回 Ack
         this.lastPageId = Math.max(this.lastPageId, id);
         if (this.debugFrames) log("ws-req", { len: body.length, head: body.subarray(0, 24).toString("hex") });
-        this.toBackend(body);
+        if (!this.tryLocalTaskList(body)) this.toBackend(body);
         this.toPage(3, Buffer.alloc(0), id);
         return;
       }
@@ -357,6 +412,31 @@ class WorkspaceRelay {
     head.writeUInt32BE(0, 5);
     head.writeUInt32BE(body.length, 9);
     this.backend.send(Buffer.concat([head, body]));
+  }
+  // 任务列表就地应答：绕过后端（CLI）与桌面端的数据根差异，直接读桌面端任务索引
+  tryLocalTaskList(body) {
+    let parsed;
+    try { parsed = rpcParseFrame(body); } catch { return false; }
+    const header = parsed.header;
+    if (!Array.isArray(header)) return false;
+    const [tcode, rid, channel, method] = header;
+    if (tcode === 100 && channel === "window-controller") {
+      log("window-controller-req", { method, args: JSON.stringify(parsed.body).slice(0, 400) });
+      return false; // 先观察，不拦截
+    }
+    if (tcode !== 100 || channel !== "zcode-task") return false;
+    if (!["listTasks", "listPinnedTasks", "listArchivedTasks"].includes(method)) return false;
+    try {
+      const argObj = Array.isArray(parsed.body) && parsed.body[0] && typeof parsed.body[0] === "object" ? parsed.body[0] : {};
+      const workspacePath = argObj.workspacePath || CFG.workspacePath;
+      const tasks = queryTasks(CFG.tasksIndexPath, method, workspacePath);
+      this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize(tasks)]));
+      log("local-task-list", { method, count: tasks.length, wsPath: workspacePath, provider: CFG.provider, db: CFG.tasksIndexPath });
+      return true;
+    } catch (e) {
+      log("local-task-list-error", { msg: String(e) });
+      return false;
+    }
   }
   toPage(type, body, ackOverride) {
     if (this.dead) return;
