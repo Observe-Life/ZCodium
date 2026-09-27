@@ -425,18 +425,18 @@ function migrateLegacyWorkspaceSession(value: unknown): unknown {
  */
 export const mobileRemoteTunnelSettingsSchema = z.object({
   enabled: z.boolean(),
-  /** 固定域名，如 qnszyg.de5.net。 */
-  domain: z.string().trim().min(1),
-  /** DNSHE 控制台里该子域名的 ID。 */
-  subdomainId: z.number().int().positive(),
+  /** 固定域名，如 qnszyg.de5.net。未配置时为空串。 */
+  domain: z.string().trim(),
+  /** DNSHE 控制台里该子域名的 ID；未配置为 0。 */
+  subdomainId: z.number().int().nonnegative(),
   /** DNSHE API Key（cfsd_ 前缀）。 */
-  dnsheKey: z.string().trim().min(1),
+  dnsheKey: z.string().trim(),
   /** DNSHE API Secret。 */
-  dnsheSecret: z.string().trim().min(1),
+  dnsheSecret: z.string().trim(),
   /** cloudflared.exe 绝对路径。 */
-  cloudflaredPath: z.string().trim().min(1),
-  /** 命名隧道运行令牌；留空走快速隧道。 */
-  token: z.string().trim().min(1),
+  cloudflaredPath: z.string().trim(),
+  /** 命名隧道运行令牌；空串=走快速隧道。 */
+  token: z.string().trim(),
 });
 
 export const mobileRemoteControlSettingsSchema = z.object({
