@@ -1,3 +1,4 @@
+/* oxlint-disable max-lines -- 手机远控设置分区：开关/状态探针/防火墙引导/隧道配置同属一个设置页边界，拆分会让状态与草稿同步更难保证。 */
 import { useCallback, useEffect, useState } from "react";
 import type { AppSettings } from "@zcode/shared";
 import { Check, Copy, RefreshCw } from "lucide-react";
