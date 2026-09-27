@@ -19,7 +19,7 @@ jobs:
           BRANCH: ${{ github.event.workflow_run.head_branch }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
         run: |
-          if [ "$CONCLUSION" = "success" ]; then STATUS="软件构建成功"; else STATUS="软件构建失败"; fi
+          if [ "$CONCLUSION" = "success" ]; then STATUS="软件构建成功"; elif [ "$CONCLUSION" = "failure" ]; then STATUS="软件构建失败"; else echo "skip notify for $CONCLUSION"; exit 0; fi
           case "$WF" in
             "Desktop CI") SOFTWARE="ZCodium 电脑端（自用版）" ;;
             "CLI Build") SOFTWARE="ZCodium 命令行版" ;;
