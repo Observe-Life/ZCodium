@@ -376,5 +376,21 @@ export interface AppSettings {
     backendCliPath?: string;
     /** 远控暴露的工作区路径。 */
     workspacePath?: string;
+    /** 公网访问（Cloudflare 隧道 + DNSHE 固定域名），可在设置页可视化管理。 */
+    tunnel?: {
+      enabled?: boolean;
+      /** 固定域名，如 qnszyg.de5.net。 */
+      domain?: string;
+      /** DNSHE 控制台里该子域名的 ID。 */
+      subdomainId?: number;
+      /** DNSHE API Key（cfsd_ 前缀）。 */
+      dnsheKey?: string;
+      /** DNSHE API Secret。 */
+      dnsheSecret?: string;
+      /** cloudflared.exe 绝对路径。 */
+      cloudflaredPath?: string;
+      /** 命名隧道运行令牌（Cloudflare 账号隧道；留空则退回快速隧道，地址每次启动会变）。 */
+      token?: string;
+    };
   };
 }

@@ -37,12 +37,22 @@ export interface MobileRemoteSupervisorHandle {
   dispose(): Promise<void>;
 }
 
+interface TunnelDesiredState {
+  domain: string;
+  subdomainId: number;
+  dnsheKey: string;
+  dnsheSecret: string;
+  cloudflaredPath: string;
+  token: string;
+}
+
 interface DesiredState {
   token: string;
   port: number;
   backendCliPath: string;
   workspacePath: string;
   dataBaseDir?: string;
+  tunnel: TunnelDesiredState | null;
 }
 
 function resolveBridgeScriptPath(): string | null {
@@ -156,6 +166,17 @@ export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): M
       backendCliPath: m.backendCliPath?.trim() ?? "",
       workspacePath: m.workspacePath?.trim() ?? "",
       dataBaseDir: settings.dataBaseDir?.trim() || undefined,
+      tunnel:
+        m.tunnel?.enabled === true
+          ? {
+              domain: m.tunnel.domain?.trim() ?? "",
+              subdomainId: m.tunnel.subdomainId ?? 0,
+              dnsheKey: m.tunnel.dnsheKey?.trim() ?? "",
+              dnsheSecret: m.tunnel.dnsheSecret?.trim() ?? "",
+              cloudflaredPath: m.tunnel.cloudflaredPath?.trim() ?? "",
+              token: m.tunnel.token?.trim() ?? "",
+            }
+          : null,
     };
   };
 
@@ -192,7 +213,10 @@ export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): M
             stopAll();
             return;
           }
-          const key = `${desired.token}|${desired.port}|${desired.backendCliPath}|${desired.workspacePath}`;
+          const tunnelKey = desired.tunnel
+            ? `${desired.tunnel.domain}|${desired.tunnel.subdomainId}|${desired.tunnel.dnsheKey ? "k" : ""}${desired.tunnel.dnsheSecret ? "s" : ""}|${desired.tunnel.cloudflaredPath}`
+            : "off";
+          const key = `${desired.token}|${desired.port}|${desired.backendCliPath}|${desired.workspacePath}|${tunnelKey}`;
           if (key !== lastDesiredKey) {
             if (lastDesiredKey !== "") {
               // 配置变更（含换令牌/端口/工作区）整体重建，避免桥与旧参数不一致。
@@ -223,6 +247,17 @@ export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): M
               BRIDGE_PORT: String(desired.port),
               BRIDGE_WORKSPACE: desired.workspacePath,
               ...(lanIp ? { BRIDGE_PUBLIC_BASE: `http://${lanIp}:${desired.port}` } : {}),
+              ...(desired.tunnel
+                ? {
+                    BRIDGE_TUNNEL: "1",
+                    BRIDGE_TUNNEL_DOMAIN: desired.tunnel.domain,
+                    BRIDGE_TUNNEL_SUBDOMAIN_ID: String(desired.tunnel.subdomainId),
+                    BRIDGE_DNSHE_KEY: desired.tunnel.dnsheKey,
+                    BRIDGE_DNSHE_SECRET: desired.tunnel.dnsheSecret,
+                    BRIDGE_CLOUDFLARED: desired.tunnel.cloudflaredPath,
+                    BRIDGE_TUNNEL_TOKEN: desired.tunnel.token,
+                  }
+                : {}),
             });
           }
         } catch (error) {

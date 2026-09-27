@@ -2125,6 +2125,37 @@ const enUS: Record<string, string> = {
   "settings.enhanced.mobileRemote.backend": "Agent backend path",
   "settings.enhanced.mobileRemote.backendDesc":
     "Absolute path to bin/zcode.mjs of the zcode CLI distribution.",
+  "settings.enhanced.mobileRemote.firewall.title": "Firewall status",
+  "settings.enhanced.mobileRemote.firewall.desc":
+    "Phones are not on loopback; Windows Firewall must allow the remote-control port. Click the button and confirm the system prompt when it is not allowed yet.",
+  "settings.enhanced.mobileRemote.firewall.allowed": "Allowed",
+  "settings.enhanced.mobileRemote.firewall.blocked": "Not allowed (click to allow)",
+  "settings.enhanced.mobileRemote.firewall.checking": "Checking…",
+  "settings.enhanced.mobileRemote.firewall.unsupported": "Not required on this system",
+  "settings.enhanced.mobileRemote.firewall.dialog":
+    "Remote control needs Windows Firewall to allow TCP {port}, otherwise your phone cannot connect.\n\nAfter clicking OK, the system will show a permission prompt — choose Yes to allow it.",
+  "settings.enhanced.mobileRemote.firewall.failed":
+    "The firewall rule was not applied. The permission prompt may have been cancelled; click the firewall status to retry.",
+  "settings.enhanced.mobileRemote.tunnel.title": "Public access (Cloudflare Tunnel)",
+  "settings.enhanced.mobileRemote.tunnel.desc":
+    "When on, your phone can reach this computer from any network through the fixed domain. Related credentials can be replaced below.",
+  "settings.enhanced.mobileRemote.tunnel.stopped": "Off",
+  "settings.enhanced.mobileRemote.tunnel.starting": "Connecting…",
+  "settings.enhanced.mobileRemote.tunnel.running": "Running ({mode})",
+  "settings.enhanced.mobileRemote.tunnel.error": "Error: {error}",
+  "settings.enhanced.mobileRemote.tunnel.publicUrl": "Public URL",
+  "settings.enhanced.mobileRemote.tunnel.publicUrlDesc":
+    "Open this address on your phone from any network (4G/5G).",
+  "settings.enhanced.mobileRemote.tunnel.domain": "Fixed domain",
+  "settings.enhanced.mobileRemote.tunnel.domainDesc":
+    "The domain provider points this domain at the tunnel; update it here when you change providers.",
+  "settings.enhanced.mobileRemote.tunnel.subdomainId": "Subdomain ID",
+  "settings.enhanced.mobileRemote.tunnel.dnsheKey": "Domain API key",
+  "settings.enhanced.mobileRemote.tunnel.dnsheSecret": "Domain API secret",
+  "settings.enhanced.mobileRemote.tunnel.token": "Tunnel token",
+  "settings.enhanced.mobileRemote.tunnel.tokenDesc":
+    "Run token of a Cloudflare account tunnel (leave empty to fall back to a temporary tunnel whose address changes on every start).",
+  "settings.enhanced.mobileRemote.tunnel.cloudflared": "cloudflared path",
   "settings.memory": "Memory",
   "settings.memory.workspaceMemory": "Workspace Memory",
   "settings.memoryDescription":

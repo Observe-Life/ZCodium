@@ -18,6 +18,7 @@
  */
 import http from "node:http";
 import net from "node:net";
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
@@ -48,6 +49,8 @@ function loadConfig() {
     notifyConfigPath: "C:\\Users\\Bingcan Lin\\AppData\\Local\\ZCode\\serverchan-notify.json",
     debugAgent: false, // 临时：抓取 zcode-agent 请求与事件结构（BRIDGE_DEBUG_AGENT=1）
     spawnBackend: null, // 例如 { command:"node", args:["...zcode.cjs","--web",...] }（增强功能开关接入后由桌面端托管）
+    // 公网隧道（Phase 4）：cloudflared 快速隧道 + DNSHE 固定域名同步；由桌面端 supervisor 透传。
+    tunnel: null, // { enabled, domain, subdomainId, dnsheKey, dnsheSecret, cloudflaredPath }
   };
   const cfgFile = process.env.ZCODIUM_BRIDGE_CONFIG || path.join(HERE, "bridge.config.json");
   if (fs.existsSync(cfgFile)) Object.assign(cfg, JSON.parse(fs.readFileSync(cfgFile, "utf8")));
@@ -59,6 +62,18 @@ function loadConfig() {
   if (process.env.BRIDGE_DEBUG_AGENT) cfg.debugAgent = process.env.BRIDGE_DEBUG_AGENT === "1";
   if (process.env.BRIDGE_WORKSPACE) cfg.workspacePath = process.env.BRIDGE_WORKSPACE;
   if (process.env.BRIDGE_HOST) cfg.host = process.env.BRIDGE_HOST;
+  if (process.env.BRIDGE_TUNNEL === "1") {
+    cfg.tunnel = {
+      enabled: true,
+      domain: process.env.BRIDGE_TUNNEL_DOMAIN || "",
+      subdomainId: Number(process.env.BRIDGE_TUNNEL_SUBDOMAIN_ID || 0),
+      dnsheKey: process.env.BRIDGE_DNSHE_KEY || "",
+      dnsheSecret: process.env.BRIDGE_DNSHE_SECRET || "",
+      cloudflaredPath: process.env.BRIDGE_CLOUDFLARED || "",
+      // 命名隧道运行令牌（CF 账号隧道）；为空时降级为快速隧道（域名每次启动会变）。
+      token: process.env.BRIDGE_TUNNEL_TOKEN || "",
+    };
+  }
   if (!cfg.token) {
     cfg.token = crypto.randomBytes(24).toString("base64url");
     console.log(`[bridge] 未配置 token，本次生成：${cfg.token}`);
@@ -259,7 +274,7 @@ const httpServer = http.createServer((req, res) => {
   // 配对页（浏览器直接打开即可拿 URL）
   if (p === "/pair") {
     if (!checkToken(req, url)) return json(res, 401, { error: "unauthorized" });
-    return json(res, 200, { pairingUrl: pairingUrl(req), sid: CFG.sid });
+    return json(res, 200, { pairingUrl: pairingUrl(req), sid: CFG.sid, tunnel: { ...tunnelState } });
   }
   // 静态页面（/remote/v4 与 /web-remote 两个入口都供同一份 SPA；页面会在带 token 时自动走 /web-remote 流程）
   if (p === "/remote/v4" || p === "/remote/v4/" || p === "/remote/v4/index.html" || p === "/web-remote" || p === "/web-remote/") {
@@ -655,6 +670,161 @@ function startNotifySubscription() {
   ws.addEventListener("error", (ev) => { log("notify-sub-error", { msg: String((ev && ev.message) || ev).slice(0, 200) }); });
 }
 
+// ── Phase 4：公网隧道（cloudflared 快速隧道 + DNSHE 固定域名自动同步）──
+// 由桌面端 supervisor 经环境变量透传配置；本模块只负责：拉起/守护 cloudflared、
+// 解析隧道域名、通过 DNSHE API 把固定域名 CNAME 指向当前隧道、暴露状态给 /pair。
+let tunnelState = {
+  enabled: false,
+  mode: null, // "named"（CF 账号命名隧道，域名固定）| "quick"（快速隧道，域名每次变）
+  tunnelId: null,
+  tunnelUrl: null,
+  fixedDomain: null,
+  publicUrl: null,
+  dnsSyncedAt: null,
+  lastError: null,
+};
+let tunnelProc = null;
+let tunnelRestartTimer = null;
+const TUNNEL_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/;
+
+async function dnsheRequest(query, init) {
+  const api = `https://api005.dnshe.com/index.php?m=domain_hub&endpoint=dns_records${query}`;
+  const headers = {
+    "X-API-Key": CFG.tunnel.dnsheKey,
+    "X-API-Secret": CFG.tunnel.dnsheSecret,
+    ...((init && init.headers) || {}),
+  };
+  const res = await fetch(api, { ...(init || {}), headers });
+  const text = await res.text();
+  let payload = null;
+  try { payload = JSON.parse(text); } catch {}
+  if (!res.ok || !payload || payload.success === false) {
+    throw new Error(`dnshe ${res.status}: ${text.slice(0, 160)}`);
+  }
+  return payload;
+}
+
+/** 命名隧道令牌是 base64(JSON)：{ a: 账户标签, t: 隧道ID, s: 隧道密钥 }。 */
+function decodeTunnelToken(token) {
+  try {
+    const json = JSON.parse(Buffer.from(token, "base64").toString("utf8"));
+    if (json && typeof json.t === "string" && json.t) return { tunnelId: json.t, accountTag: json.a };
+  } catch {}
+  return null;
+}
+
+/** 记录固定域名的对外地址（DNS 已指向 targetHost 后调用）。 */
+function applyFixedDomain(targetHost) {
+  const base = `https://${CFG.tunnel.domain}`;
+  tunnelState.fixedDomain = CFG.tunnel.domain;
+  tunnelState.dnsSyncedAt = Date.now();
+  tunnelState.lastError = null;
+  tunnelState.publicUrl = `${base}/web-remote?remoteControlToken=${encodeURIComponent(CFG.token)}&relayOrigin=${encodeURIComponent(base)}`;
+  log("tunnel-dns-synced", { host: targetHost, domain: CFG.tunnel.domain });
+}
+
+async function syncFixedDomain(targetHost) {
+  const list = await dnsheRequest(`&action=list&subdomain_id=${CFG.tunnel.subdomainId}`);
+  for (const record of list.records || []) {
+    if (record && record.record_id) {
+      await dnsheRequest("&action=delete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ record_id: record.record_id }),
+      });
+    }
+  }
+  await dnsheRequest("&action=create", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      subdomain_id: CFG.tunnel.subdomainId,
+      type: "CNAME",
+      content: targetHost,
+    }),
+  });
+  applyFixedDomain(targetHost);
+}
+
+/** cloudflared 子进程的公共接线：URL 扫描（仅快速隧道用）、崩溃自愈。 */
+function attachTunnelChild(child, watchForQuickUrl) {
+  tunnelProc = child;
+  if (watchForQuickUrl) {
+    const scan = (chunk) => {
+      const match = String(chunk).match(TUNNEL_URL_RE);
+      if (!match) return;
+      const url = match[0];
+      if (url === tunnelState.tunnelUrl) return;
+      tunnelState.tunnelUrl = url;
+      log("tunnel-url", { url });
+      syncFixedDomain(url.replace(/^https:\/\//, "")).catch((error) => {
+        tunnelState.lastError = String(error);
+        log("tunnel-dns-error", { msg: String(error).slice(0, 200) });
+      });
+    };
+    child.stdout.on("data", scan);
+    child.stderr.on("data", scan);
+  }
+  child.on("error", (error) => log("tunnel-spawn-error", { msg: String(error) }));
+  child.on("exit", (code) => {
+    tunnelProc = null;
+    log("tunnel-exit", { code });
+    if (tunnelState.enabled && !tunnelRestartTimer) {
+      tunnelRestartTimer = setTimeout(() => {
+        tunnelRestartTimer = null;
+        startTunnel();
+      }, 5000);
+    }
+  });
+}
+
+function startTunnel() {
+  const cfg = CFG.tunnel;
+  if (!cfg || !cfg.enabled) return;
+  tunnelState.enabled = true;
+  const dnsReady = Boolean(cfg.domain && cfg.subdomainId && cfg.dnsheKey && cfg.dnsheSecret);
+  if (!cfg.cloudflaredPath || !dnsReady) {
+    tunnelState.lastError = "tunnel-config-incomplete";
+    log("tunnel-config-incomplete", {});
+    return;
+  }
+
+  // 命名隧道（首选）：令牌含隧道 ID，DNS 目标恒为 <id>.cfargotunnel.com，域名与地址跨重启稳定。
+  if (cfg.token) {
+    const info = decodeTunnelToken(cfg.token);
+    if (!info) {
+      tunnelState.lastError = "tunnel-token-invalid";
+      log("tunnel-token-invalid", {});
+      return;
+    }
+    const targetHost = `${info.tunnelId}.cfargotunnel.com`;
+    tunnelState.mode = "named";
+    tunnelState.tunnelId = info.tunnelId;
+    tunnelState.tunnelUrl = `https://${targetHost}`;
+    applyFixedDomain(targetHost);
+    syncFixedDomain(targetHost).catch((error) => {
+      tunnelState.lastError = String(error);
+      log("tunnel-dns-error", { msg: String(error).slice(0, 200) });
+    });
+    const child = spawn(cfg.cloudflaredPath, ["tunnel", "--no-autoupdate", "run", "--token", cfg.token], {
+      windowsHide: true,
+    });
+    attachTunnelChild(child, false);
+    log("tunnel-started", { mode: "named", tunnelId: info.tunnelId, port: CFG.port });
+    return;
+  }
+
+  // 快速隧道（降级备用）：地址每次启动都变，由 DNS 同步跟随。
+  tunnelState.mode = "quick";
+  const child = spawn(
+    cfg.cloudflaredPath,
+    ["tunnel", "--url", `http://127.0.0.1:${CFG.port}`, "--no-autoupdate"],
+    { windowsHide: true },
+  );
+  attachTunnelChild(child, true);
+  log("tunnel-started", { mode: "quick", bin: cfg.cloudflaredPath, port: CFG.port });
+}
+
 // ── main ────────────────────────────────────────────────────────────────
 httpServer.listen(CFG.port, CFG.host, () => {
   console.log(`[bridge] http://${CFG.host}:${CFG.port}`);
@@ -663,5 +833,6 @@ httpServer.listen(CFG.port, CFG.host, () => {
   console.log(`  ${pairingUrl(demoReq)}`);
   console.log(`[bridge] 令牌即 URL 里的 hash 参数；日志: ${LOG_FILE}`);
   startNotifySubscription();
+  startTunnel();
 });
 process.on("SIGINT", () => { try { backendProc && backendProc.kill(); } catch {} process.exit(0); });

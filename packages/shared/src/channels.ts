@@ -328,6 +328,10 @@ export const PlatformChannels = {
   ImportChromeBrowserData: "zcode:import-chrome-browser-data",
   /** Renderer → Main：清理内置浏览器缓存或全部站点数据。 */
   ClearEmbeddedBrowserData: "zcode:clear-embedded-browser-data",
+  /** ZCodium 自用版（custom 分支）：查询手机远控端口的 Windows 防火墙放行状态。 */
+  GetMobileRemoteFirewallStatus: "zcode:get-mobile-remote-firewall-status",
+  /** ZCodium 自用版（custom 分支）：请求放行手机远控端口的防火墙规则（必要时 UAC 提权）。 */
+  EnsureMobileRemoteFirewallRule: "zcode:ensure-mobile-remote-firewall-rule",
   /** Main → Renderer：通知有新版本已下载完毕，可以重启安装 */
   UpdateReady: "zcode:update-ready",
   /** Main → Renderer：用户手动点击"检查更新"后的结果反馈（toast 用） */

@@ -861,6 +861,14 @@ export interface IPlatformService {
   /** 清理内置浏览器持久化分区；cache 模式保留认证数据，all 模式清理全部站点数据。 */
   clearEmbeddedBrowserData?(mode: "cache" | "all"): Promise<EmbeddedBrowserDataClearResult>;
 
+  /** ZCodium 自用版（custom 分支）：查询手机远控端口的防火墙放行状态。 */
+  getMobileRemoteFirewallStatus?(port: number): Promise<{ supported: boolean; allowed: boolean }>;
+
+  /** ZCodium 自用版（custom 分支）：放行手机远控端口（未放行时由 main 触发系统提权确认）。 */
+  ensureMobileRemoteFirewallRule?(
+    port: number,
+  ): Promise<{ supported: boolean; allowed: boolean; error?: string }>;
+
   /** 注册新版本已下载完毕的回调，参数为新版本号，返回 disposer */
   onUpdateReady(callback: (version: string) => void): () => void;
 

@@ -419,12 +419,33 @@ function migrateLegacyWorkspaceSession(value: unknown): unknown {
  * ZCodium 自用版增强功能：手机远控托管配置（custom 分支专有字段）。
  * 完整 schema 要求全字段；设置补丁侧用 .partial() 允许逐项写入。
  */
+/**
+ * ZCodium 自用版：手机远控的公网隧道配置（Cloudflare 隧道 + DNSHE 固定域名）。
+ * 设置页可逐项可视化管理，便于日后更换配套服务。
+ */
+export const mobileRemoteTunnelSettingsSchema = z.object({
+  enabled: z.boolean(),
+  /** 固定域名，如 qnszyg.de5.net。 */
+  domain: z.string().trim().min(1),
+  /** DNSHE 控制台里该子域名的 ID。 */
+  subdomainId: z.number().int().positive(),
+  /** DNSHE API Key（cfsd_ 前缀）。 */
+  dnsheKey: z.string().trim().min(1),
+  /** DNSHE API Secret。 */
+  dnsheSecret: z.string().trim().min(1),
+  /** cloudflared.exe 绝对路径。 */
+  cloudflaredPath: z.string().trim().min(1),
+  /** 命名隧道运行令牌；留空走快速隧道。 */
+  token: z.string().trim().min(1),
+});
+
 export const mobileRemoteControlSettingsSchema = z.object({
   enabled: z.boolean(),
   token: z.string().min(8),
   port: z.number().int().positive().max(65535),
   backendCliPath: z.string().trim().min(1),
   workspacePath: z.string().trim().min(1),
+  tunnel: mobileRemoteTunnelSettingsSchema.partial().optional(),
 });
 
 const appSettingsObjectSchema = z.object({

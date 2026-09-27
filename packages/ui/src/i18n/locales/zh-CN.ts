@@ -2000,6 +2000,37 @@ const zhCN: Record<string, string> = {
   "settings.enhanced.mobileRemote.workspaceDesc": "手机侧看到的任务与会话所在工作区。",
   "settings.enhanced.mobileRemote.backend": "智能体后端路径",
   "settings.enhanced.mobileRemote.backendDesc": "zcode CLI 发行版的 bin/zcode.mjs 绝对路径。",
+  "settings.enhanced.mobileRemote.firewall.title": "防火墙状态",
+  "settings.enhanced.mobileRemote.firewall.desc":
+    "手机不在本机回环上，需要 Windows 防火墙放行远控端口；未放行时点击右侧按钮并按系统提示确认。",
+  "settings.enhanced.mobileRemote.firewall.allowed": "已放行",
+  "settings.enhanced.mobileRemote.firewall.blocked": "未放行（点击放行）",
+  "settings.enhanced.mobileRemote.firewall.checking": "检查中…",
+  "settings.enhanced.mobileRemote.firewall.unsupported": "当前系统无需放行",
+  "settings.enhanced.mobileRemote.firewall.dialog":
+    "远控功能需要放行 Windows 防火墙端口（TCP {port}），否则手机无法连接。\n\n点击“确定”后，系统将弹出权限确认窗口，请选择“是”完成放行。",
+  "settings.enhanced.mobileRemote.firewall.failed":
+    "未能完成防火墙放行。可能是权限确认被取消，可再次点击“防火墙状态”重试。",
+  "settings.enhanced.mobileRemote.tunnel.title": "公网访问（Cloudflare 隧道）",
+  "settings.enhanced.mobileRemote.tunnel.desc":
+    "开启后手机在任何网络下都能通过固定域名访问本机；配套参数可在下方更换。",
+  "settings.enhanced.mobileRemote.tunnel.stopped": "未开启",
+  "settings.enhanced.mobileRemote.tunnel.starting": "连接中…",
+  "settings.enhanced.mobileRemote.tunnel.running": "运行中（{mode}）",
+  "settings.enhanced.mobileRemote.tunnel.error": "异常：{error}",
+  "settings.enhanced.mobileRemote.tunnel.publicUrl": "公网地址",
+  "settings.enhanced.mobileRemote.tunnel.publicUrlDesc":
+    "手机在任何网络（4G/5G）下用此地址打开即可。",
+  "settings.enhanced.mobileRemote.tunnel.domain": "固定域名",
+  "settings.enhanced.mobileRemote.tunnel.domainDesc":
+    "由域名服务商解析到隧道；更换域名时同步修改这一项。",
+  "settings.enhanced.mobileRemote.tunnel.subdomainId": "域名子域 ID",
+  "settings.enhanced.mobileRemote.tunnel.dnsheKey": "域名 API Key",
+  "settings.enhanced.mobileRemote.tunnel.dnsheSecret": "域名 API Secret",
+  "settings.enhanced.mobileRemote.tunnel.token": "隧道令牌",
+  "settings.enhanced.mobileRemote.tunnel.tokenDesc":
+    "Cloudflare 账号隧道的运行令牌（留空则退回临时隧道，地址每次启动会变）。",
+  "settings.enhanced.mobileRemote.tunnel.cloudflared": "cloudflared 路径",
   "settings.memory": "记忆",
   "settings.memory.workspaceMemory": "工作区记忆",
   "settings.memoryDescription":
