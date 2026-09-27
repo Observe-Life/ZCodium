@@ -56,17 +56,17 @@ const BASE_SETTINGS_SECTION_GROUPS: Array<{
 ];
 
 const BASE_SETTINGS_SECTIONS: SettingsSectionDefinition[] = [
-  {
-    id: "general",
-    icon: Settings2,
-    titleId: "settings.systemTitle",
-    groupId: "basics",
-  },
-  // ZCodium 自用版增强功能（custom 分支）：手机远控开关托管，置于通用之后首屏可见。
+  // ZCodium 自用版增强功能（custom 分支）：手机远控开关托管，置顶（用户指定排在"常规"之上）。
   {
     id: "enhanced",
     icon: Smartphone,
     titleId: "settings.enhanced.title",
+    groupId: "basics",
+  },
+  {
+    id: "general",
+    icon: Settings2,
+    titleId: "settings.systemTitle",
     groupId: "basics",
   },
   {

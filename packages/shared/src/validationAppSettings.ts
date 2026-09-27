@@ -566,4 +566,7 @@ export const appSettingsPatchSchema = z.object({
     .optional(),
   settingsSyncFirstRunPromptHandled: z.boolean().optional(),
   zcodeEndpointOrigin: zcodeEndpointOriginSchema.optional(),
+  // ZCodium 自用版：手机远控开关托管。patch 侧漏字段会被 z.object 静默丢弃，
+  // 表现为"界面点开关无反应"，必须与 appSettingsObjectSchema 同步登记。
+  mobileRemoteControl: mobileRemoteControlSettingsSchema.partial().optional(),
 });
