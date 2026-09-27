@@ -1,0 +1,32 @@
+name: Build Notify (ServerChan)
+
+on:
+  workflow_run:
+    workflows: ["Desktop CI", "CLI Build", "macOS Desktop Build"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push build result to ServerChan
+        env:
+          SEND_URL: ${{ secrets.SERVERCHAN_SEND_URL }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WF: ${{ github.event.workflow_run.name }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          if [ "$CONCLUSION" = "success" ]; then STATUS="软件构建成功"; else STATUS="软件构建失败"; fi
+          case "$WF" in
+            "Desktop CI") SOFTWARE="ZCodium 电脑端（自用版）" ;;
+            "CLI Build") SOFTWARE="ZCodium 命令行版" ;;
+            "macOS Desktop Build") SOFTWARE="ZCodium 电脑端（macOS）" ;;
+            *) SOFTWARE="$WF" ;;
+          esac
+          echo "notify: $WF / $CONCLUSION / $BRANCH -> $SOFTWARE"
+          curl -sS -X POST "$SEND_URL" \
+            --data-urlencode "title=【云端开发】$STATUS" \
+            --data-urlencode "desp=$SOFTWARE"
