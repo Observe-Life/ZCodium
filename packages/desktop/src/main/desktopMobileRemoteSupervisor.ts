@@ -1,7 +1,6 @@
 /* eslint-disable max-lines -- 手机远控的拉起/守护/回收与配对信息解析属于同一个桌面主进程托管边界，拆开反而打散状态机。 */
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 import type { ISettingService } from "@zcode/services";
@@ -61,16 +60,6 @@ function resolveBridgeScriptPath(): string | null {
     : [path.resolve(import.meta.dirname, "../../../../bridge/zcodium-mobile-bridge.mjs")];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
-/** 手机不在本机回环上，桥需要 LAN 地址拼配对 URL；取第一个非 internal 的 IPv4。 */
-function detectLanIPv4(): string | null {
-  for (const entries of Object.values(os.networkInterfaces())) {
-    for (const entry of entries ?? []) {
-      if (String(entry.family) === "IPv4" && !entry.internal) return entry.address;
-    }
   }
   return null;
 }
@@ -236,17 +225,22 @@ export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): M
                 String(BACKEND_PORT),
                 "--no-open",
               ],
-              desired.dataBaseDir ? { ZCODE_DATA_BASE_DIR: desired.dataBaseDir } : {},
+              desired.dataBaseDir
+                ? {
+                    ZCODE_DATA_BASE_DIR: desired.dataBaseDir,
+                    // 关键：让手机链路的后端与桌面端共用同一份 .zcodium 数据（会话/任务一致、新建可用）。
+                    ZCODE_DESKTOP_HOME_DIR: desired.dataBaseDir,
+                  }
+                : {},
             );
           }
           if (!bridgeChild) {
-            const lanIp = detectLanIPv4();
             bridgeChild = spawnNode("bridge", bridgeScript, [], {
               BRIDGE_TOKEN: desired.token,
-              BRIDGE_HOST: "0.0.0.0",
+              // r6：统一走公网隧道，桥只监听本机回环（不再对局域网开放、无需防火墙放行）。
+              BRIDGE_HOST: "127.0.0.1",
               BRIDGE_PORT: String(desired.port),
               BRIDGE_WORKSPACE: desired.workspacePath,
-              ...(lanIp ? { BRIDGE_PUBLIC_BASE: `http://${lanIp}:${desired.port}` } : {}),
               ...(desired.tunnel
                 ? {
                     BRIDGE_TUNNEL: "1",

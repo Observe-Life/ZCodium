@@ -148,12 +148,5 @@ export function createDesktopPlatform(options: {
       window.zcode.getSystemLocale?.() ??
       Promise.resolve(navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en-US"),
     setTitleBarTheme: (theme) => window.zcode.setTitleBarTheme(theme),
-    // ZCodium 自用版（custom 分支）：手机远控的防火墙放行（界面引导/状态行使用）。
-    getMobileRemoteFirewallStatus: window.zcode.getMobileRemoteFirewallStatus
-      ? (port) => window.zcode.getMobileRemoteFirewallStatus!(port)
-      : undefined,
-    ensureMobileRemoteFirewallRule: window.zcode.ensureMobileRemoteFirewallRule
-      ? (port) => window.zcode.ensureMobileRemoteFirewallRule!(port)
-      : undefined,
   };
 }

@@ -1,19 +1,17 @@
-/* oxlint-disable max-lines -- 手机远控设置分区：开关/状态探针/防火墙引导/隧道配置同属一个设置页边界，拆分会让状态与草稿同步更难保证。 */
+/* oxlint-disable max-lines -- 手机远控设置分区：开关/状态探针/隧道配置同属一个设置页边界，拆分会让状态与草稿同步更难保证。 */
 import { useCallback, useEffect, useState } from "react";
 import type { AppSettings } from "@zcode/shared";
 import { Check, Copy, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button.js";
 import { Input } from "@/components/ui/input.js";
 import { Switch } from "@/components/ui/switch.js";
-import { usePlatform } from "@/hooks/usePlatform.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { SettingsGroupCard, SettingsRow } from "@/settings/SettingsPageParts.js";
 
 /**
  * ZCodium 自用版「增强功能」分区（custom 分支）：手机远控开关托管。
- * 开关写入 setting.json 的 mobileRemoteControl；桌面主进程的 supervisor 轮询该期望态，
- * 自动拉起/回收 `zcode --web` 后端与 mobile-bridge（含 cloudflared 公网隧道）。
- * 本页负责：开关、状态、配对信息完整展示、防火墙放行引导、隧道配套参数的可视化管理。
+ * r6 起统一走公网隧道：不再提供局域网配对地址，也不再需要防火墙放行；
+ * 手机端只需在 App 里填固定域名（App 会自动寻址当前隧道）。
  */
 
 type MobileRemoteConfig = NonNullable<AppSettings["mobileRemoteControl"]>;
@@ -39,7 +37,6 @@ interface MobileRemoteSectionProps {
 }
 
 type BridgeStatus = "unknown" | "running" | "stopped";
-type FirewallStatus = { supported: boolean; allowed: boolean } | null;
 
 interface TunnelProbeInfo {
   enabled?: boolean;
@@ -50,12 +47,9 @@ interface TunnelProbeInfo {
 
 export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRemoteSectionProps) {
   const { intl } = useZCodeIntl();
-  const platform = usePlatform();
   const [status, setStatus] = useState<BridgeStatus>("unknown");
-  const [pairingUrl, setPairingUrl] = useState<string | null>(null);
   const [tunnelInfo, setTunnelInfo] = useState<TunnelProbeInfo | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
-  const [firewall, setFirewall] = useState<FirewallStatus>(null);
 
   const [portDraft, setPortDraft] = useState(String(config?.port ?? DEFAULT_BRIDGE_PORT));
   const [workspaceDraft, setWorkspaceDraft] = useState(
@@ -100,12 +94,11 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
   const port = config?.port ?? DEFAULT_BRIDGE_PORT;
   const tunnelEnabled = config?.tunnel?.enabled === true;
 
-  // 桥状态 + 配对信息 + 隧道状态：直接问桥的 /pair（内含 LAN 地址与令牌），5s 轮询。
+  // 桥与隧道状态：直接问桥的 /pair（回环），5s 轮询。
   useEffect(() => {
     const token = config?.token;
     if (!enabled || !token) {
       setStatus("stopped");
-      setPairingUrl(null);
       setTunnelInfo(null);
       return;
     }
@@ -117,13 +110,10 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
           `http://127.0.0.1:${currentPort}/pair?token=${encodeURIComponent(token)}`,
           { signal: AbortSignal.timeout(2_500) },
         );
-        const data: { pairingUrl?: string; tunnel?: TunnelProbeInfo } | null = res.ok
-          ? await res.json()
-          : null;
+        const data: { tunnel?: TunnelProbeInfo } | null = res.ok ? await res.json() : null;
         if (cancelled) return;
-        if (data?.pairingUrl) {
+        if (data) {
           setStatus("running");
-          setPairingUrl(data.pairingUrl);
           setTunnelInfo(data.tunnel ?? null);
         } else {
           setStatus("stopped");
@@ -131,7 +121,6 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
       } catch {
         if (!cancelled) {
           setStatus("stopped");
-          setPairingUrl(null);
         }
       }
     };
@@ -143,54 +132,11 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
     };
   }, [enabled, config?.token, port]);
 
-  // Windows 防火墙放行状态（手机不在回环上，必须放行端口）。
-  const refreshFirewall = useCallback(async () => {
-    const api = platform.getMobileRemoteFirewallStatus;
-    if (!api) {
-      setFirewall({ supported: false, allowed: true });
-      return;
-    }
-    try {
-      setFirewall(await api(port));
-    } catch {
-      setFirewall({ supported: true, allowed: false });
-    }
-  }, [platform, port]);
-
-  useEffect(() => {
-    void refreshFirewall();
-  }, [refreshFirewall, enabled]);
-
-  const requestFirewallAllow = useCallback(async (): Promise<boolean> => {
-    const api = platform.ensureMobileRemoteFirewallRule;
-    if (!api) return true;
-    const confirmed = window.confirm(
-      intl.formatMessage({ id: "settings.enhanced.mobileRemote.firewall.dialog" }, { port }),
-    );
-    if (!confirmed) return false;
-    try {
-      const result = await api(port);
-      setFirewall({ supported: result.supported, allowed: result.allowed });
-      if (!result.allowed) {
-        window.alert(intl.formatMessage({ id: "settings.enhanced.mobileRemote.firewall.failed" }));
-      }
-      return result.allowed;
-    } catch {
-      setFirewall({ supported: true, allowed: false });
-      window.alert(intl.formatMessage({ id: "settings.enhanced.mobileRemote.firewall.failed" }));
-      return false;
-    }
-  }, [platform, port, intl]);
-
   const handleToggle = useCallback(
     async (next: boolean) => {
       if (!next) {
         await onUpdate({ enabled: false });
         return;
-      }
-      // 首次开启（或尚未放行时）先引导防火墙放行；用户取消也不阻断开关本身。
-      if (firewall?.supported && !firewall.allowed) {
-        await requestFirewallAllow();
       }
       await onUpdate({
         enabled: true,
@@ -200,7 +146,7 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
         backendCliPath: config?.backendCliPath || DEFAULT_BACKEND_CLI_PATH,
       });
     },
-    [config, dataBaseDir, firewall, onUpdate, requestFirewallAllow],
+    [config, dataBaseDir, onUpdate],
   );
 
   const updateTunnel = useCallback(
@@ -243,17 +189,8 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
   );
 
   const handleCommitTunnelField = useCallback(
-    async (
-      field: keyof TunnelConfig,
-      value: string | number,
-      current: string | number | undefined,
-      fallback?: string,
-    ) => {
+    async (field: keyof TunnelConfig, value: string | number, current: string | number | undefined) => {
       if (value === current) return;
-      if (typeof value === "string" && !value.trim()) {
-        if (fallback !== undefined) return;
-        return;
-      }
       await updateTunnel({ [field]: value } as Partial<TunnelConfig>);
     },
     [updateTunnel],
@@ -272,14 +209,6 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
       : enabled
         ? intl.formatMessage({ id: "settings.enhanced.mobileRemote.starting" })
         : intl.formatMessage({ id: "settings.enhanced.mobileRemote.stopped" });
-
-  const firewallLabel = !firewall
-    ? intl.formatMessage({ id: "settings.enhanced.mobileRemote.firewall.checking" })
-    : !firewall.supported
-      ? intl.formatMessage({ id: "settings.enhanced.mobileRemote.firewall.unsupported" })
-      : firewall.allowed
-        ? intl.formatMessage({ id: "settings.enhanced.mobileRemote.firewall.allowed" })
-        : intl.formatMessage({ id: "settings.enhanced.mobileRemote.firewall.blocked" });
 
   const tunnelStatusLabel = !tunnelInfo?.enabled
     ? intl.formatMessage({ id: "settings.enhanced.mobileRemote.tunnel.stopped" })
@@ -316,22 +245,6 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
 
       {!enabled ? null : (
         <SettingsGroupCard>
-          {pairingUrl ? (
-            <SettingsRow
-              label={intl.formatMessage({ id: "settings.enhanced.mobileRemote.pairUrl" })}
-              description={intl.formatMessage({ id: "settings.enhanced.mobileRemote.pairUrlDesc" })}
-              control={
-                <div className="flex w-[520px] items-start gap-2">
-                  <span className="min-w-0 flex-1 break-all font-mono text-ui-sm text-foreground-subtle">
-                    {pairingUrl}
-                  </span>
-                  <Button variant="outline" size="sm" onClick={() => void handleCopy(pairingUrl, "pair")}>
-                    {copied === "pair" ? <Check className="size-4" /> : <Copy className="size-4" />}
-                  </Button>
-                </div>
-              }
-            />
-          ) : null}
           <SettingsRow
             label={intl.formatMessage({ id: "settings.enhanced.mobileRemote.token" })}
             description={intl.formatMessage({ id: "settings.enhanced.mobileRemote.tokenDesc" })}
@@ -351,24 +264,6 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
                   <RefreshCw className="size-4" />
                 </Button>
               </div>
-            }
-          />
-          <SettingsRow
-            label={intl.formatMessage({ id: "settings.enhanced.mobileRemote.firewall.title" })}
-            description={intl.formatMessage({ id: "settings.enhanced.mobileRemote.firewall.desc" })}
-            control={
-              <Button
-                variant={firewall?.supported && !firewall.allowed ? "default" : "outline"}
-                size="sm"
-                onClick={() => {
-                  void (async () => {
-                    if (firewall?.supported && !firewall.allowed) await requestFirewallAllow();
-                    else await refreshFirewall();
-                  })();
-                }}
-              >
-                {firewallLabel}
-              </Button>
             }
           />
           <SettingsRow
@@ -473,7 +368,7 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
                     onChange={(event) => setSubdomainIdDraft(event.target.value)}
                     onBlur={() => {
                       const next = Number.parseInt(subdomainIdDraft, 10);
-                      if (Number.isFinite(next) && next > 0) {
+                      if (Number.isFinite(next) && next >= 0) {
                         void handleCommitTunnelField("subdomainId", next, config?.tunnel?.subdomainId);
                       } else {
                         setSubdomainIdDraft(String(config?.tunnel?.subdomainId ?? ""));
@@ -542,7 +437,6 @@ export function MobileRemoteSection({ config, dataBaseDir, onUpdate }: MobileRem
                         "cloudflaredPath",
                         cloudflaredDraft.trim(),
                         config?.tunnel?.cloudflaredPath,
-                        DEFAULT_CLOUDFLARED_PATH,
                       )
                     }
                   />

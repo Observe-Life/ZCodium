@@ -153,8 +153,9 @@ function rpcParseFrame(buf) {
 // ── 任务列表就地应答（读桌面端任务索引）────────────────────────────────
 function queryTasks(indexPath, kind, workspacePath) {  const db = new DatabaseSync(indexPath, { readOnly: true });
   try {
-    const where = ["workspace_key = ?", "provider = ?"];
-    const params = [workspacePath, CFG.provider];
+    // 只按工作区过滤：provider 字段会随用户换模型而变，带着它会漏列会话（r6）。
+    const where = ["workspace_key = ?"];
+    const params = [workspacePath];
     if (kind === "listTasks") { where.push("pinned = 0", "archived = 0", "deleted = 0"); }
     if (kind === "listPinnedTasks") { where.push("pinned = 1", "archived = 0", "deleted = 0"); }
     if (kind === "listArchivedTasks") { where.push("archived = 1"); }
@@ -258,7 +259,7 @@ function checkToken(req, url) {
   return false;
 }
 function pairingUrl(req) {
-  const base = (CFG.publicBaseUrl || `https://${req.headers.host}`).replace(/\/$/, "");
+  const base = `https://${req.headers.host}`.replace(/\/$/, "");
   // 带 token 时页面自动走 /web-remote 流程；relayOrigin 显式给出以确保 REST/WS 都指回本桥。
   return `${base}/web-remote?remoteControlToken=${encodeURIComponent(CFG.token)}&relayOrigin=${encodeURIComponent(base)}`;
 }
@@ -301,7 +302,9 @@ const httpServer = http.createServer((req, res) => {
     req.on("end", () => {
       let workspaceKey = "ws-local";
       try { const b = JSON.parse(body || "{}"); if (b.workspaceKey) workspaceKey = b.workspaceKey; } catch {}
-      const base = CFG.publicBaseUrl || `${req.socket.encrypted ? "wss" : "ws"}://${req.headers.host}`;
+      const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+      const isSecure = forwardedProto ? forwardedProto === "https" : Boolean(req.socket.encrypted);
+      const base = `${isSecure ? "wss" : "ws"}://${req.headers.host}`;
       const wsBase = base.replace(/^http/, "ws").replace(/\/$/, "");
       return json(res, 200, {
         wsUrl: `${wsBase}/ws/remote-control/workspace/${CFG.token}`,
@@ -685,7 +688,7 @@ let tunnelState = {
 };
 let tunnelProc = null;
 let tunnelRestartTimer = null;
-const TUNNEL_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/;
+const TUNNEL_URL_RE = /https:\/\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com/;
 
 async function dnsheRequest(query, init) {
   const api = `https://api005.dnshe.com/index.php?m=domain_hub&endpoint=dns_records${query}`;

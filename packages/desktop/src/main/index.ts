@@ -163,7 +163,6 @@ import {
   startMobileRemoteSupervisor,
   type MobileRemoteSupervisorHandle,
 } from "./desktopMobileRemoteSupervisor.js";
-import { registerMobileRemoteFirewallIpcHandlers } from "./desktopMobileRemoteFirewall.js";
 import {
   clearWorkspaceDeepLinkStateForWindow,
   handleDeepLink,
@@ -1775,10 +1774,6 @@ app.whenReady().then(async () => {
     logger.error("[mobile-remote] failed to start supervisor:", error);
   }
 
-  // ZCodium 自用版：手机远控的防火墙放行 IPC（界面"防火墙状态"与首次开启引导调用）。
-  try {
-    registerMobileRemoteFirewallIpcHandlers(logger);
-  } catch (error) {
     logger.error("[mobile-remote] failed to register firewall IPC:", error);
   }
 
