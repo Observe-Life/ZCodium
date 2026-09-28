@@ -164,6 +164,52 @@ function queryTasks(indexPath, kind, workspacePath) {  const db = new DatabaseSy
   } finally { try { db.close(); } catch {} }
 }
 
+// window-controller 通道：任务列表（页面首页/侧栏的真实数据源）
+// kind 语义对齐桌面端 Lc()：pinned=置顶且未归档；archived=已归档；timeline=未置顶未归档；active=未归档。
+function queryTaskRows(indexPath, kind, workspacePath) {
+  const db = new DatabaseSync(indexPath, { readOnly: true });
+  try {
+    const where = ["workspace_key = ?", "deleted = 0"];
+    const params = [workspacePath];
+    if (kind === "pinned") where.push("pinned = 1", "archived = 0");
+    else if (kind === "archived") where.push("archived = 1");
+    else if (kind === "active") where.push("archived = 0");
+    else where.push("pinned = 0", "archived = 0"); // timeline（默认）
+    const rows = db.prepare(`SELECT meta_json, pinned, archived FROM tasks WHERE ${where.join(" AND ")} ORDER BY updated_at DESC`).all(...params);
+    return rows.map((r) => {
+      let meta = null;
+      try { meta = JSON.parse(r.meta_json); } catch { /* 坏行跳过 */ }
+      return meta ? { meta, pinned: r.pinned === 1, archived: r.archived === 1 } : null;
+    }).filter(Boolean);
+  } finally { try { db.close(); } catch {} }
+}
+
+// 按桌面端 buildSourceRows 的线上形状组装任务项（address/meta/membership/sourceAvailability/liveStatus）
+function buildTaskListPayload(args) {
+  const scopes = Array.isArray(args.workspaceScopes) && args.workspaceScopes.length
+    ? args.workspaceScopes
+    : [{ workspacePath: CFG.workspacePath }];
+  const kind = args.kind || "timeline";
+  const limit = typeof args.limit === "number" && args.limit > 0 ? args.limit : 200;
+  const items = [];
+  for (const scope of scopes) {
+    const wsPath = scope.workspacePath || CFG.workspacePath;
+    for (const row of queryTaskRows(CFG.tasksIndexPath, kind, wsPath)) {
+      const m = row.meta;
+      const address = { taskId: m.taskId, workspacePath: m.workspacePath || wsPath };
+      if (m.workspaceIdentity || scope.workspaceIdentity) address.workspaceIdentity = m.workspaceIdentity || scope.workspaceIdentity;
+      items.push({
+        address,
+        meta: m,
+        membership: { pinned: row.pinned, archived: row.archived, active: !row.archived },
+        sourceAvailability: "online",
+        liveStatus: m.status === "completed" ? "completed" : m.status === "error" ? "error" : "idle",
+      });
+    }
+  }
+  return { items: items.slice(0, limit), total: items.length, hasMore: items.length > limit };
+}
+
 // ── 极简 WebSocket 服务器（RFC6455，文本帧为主，支持分片/ping/close）────
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 function wsAccept(key) {
@@ -462,7 +508,38 @@ class WorkspaceRelay {
     const [tcode, rid, channel, method] = header;
     if (tcode === 100 && channel === "window-controller") {
       log("window-controller-req", { method, args: JSON.stringify(parsed.body).slice(0, 400) });
-      return false; // 先观察，不拦截
+      // 就地应答（CLI 后端不实现该通道；页面首页/侧栏的列表与订阅全靠它）
+      try {
+        const argObj = Array.isArray(parsed.body) && parsed.body[0] && typeof parsed.body[0] === "object" ? parsed.body[0] : {};
+        if (!this.subs) this.subs = new Map();
+        if (method === "subscribeControllerV4") {
+          const subscriptionId = "sub-" + crypto.randomBytes(6).toString("hex");
+          this.subs.set(subscriptionId, String(argObj.topic || ""));
+          this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize({ ack: { subscriptionId } })]));
+          log("controller-subscribed", { topic: argObj.topic, subscriptionId });
+          return true;
+        }
+        if (method === "unsubscribeControllerV4") {
+          if (typeof argObj.subscriptionId === "string") this.subs.delete(argObj.subscriptionId);
+          this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize({ ack: { subscriptionId: String(argObj.subscriptionId || "") } })]));
+          log("controller-unsubscribed", { subscriptionId: argObj.subscriptionId });
+          return true;
+        }
+        if (method === "resyncControllerV4") {
+          this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize({ ack: { subscriptionId: String(argObj.subscriptionId || "") } })]));
+          log("controller-resync", { subscriptionId: argObj.subscriptionId });
+          return true;
+        }
+        if (method === "listTaskList") {
+          const payload = buildTaskListPayload(argObj);
+          this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize(payload)]));
+          log("controller-task-list", { kind: argObj.kind, count: payload.items.length, total: payload.total });
+          return true;
+        }
+      } catch (e) {
+        log("window-controller-error", { method, msg: String(e).slice(0, 200) });
+      }
+      return false; // 未实现的方法仍转给后端
     }
     if (tcode !== 100 || channel !== "zcode-task") return false;
     if (!["listTasks", "listPinnedTasks", "listArchivedTasks"].includes(method)) return false;
