@@ -828,6 +828,33 @@ function startTunnel() {
   log("tunnel-started", { mode: "quick", bin: cfg.cloudflaredPath, port: CFG.port });
 }
 
+// ── 隧道健康哨兵 ─────────────────────────────────────────────────────────
+// 快速隧道会"僵而不死"：cloudflared 进程活着，但到 Cloudflare 边缘的连接已断、
+// 也不再吐新地址——exit 自愈管不到这种情况。哨兵每 60 秒从公网回探本机桥，
+// 连续 2 次失败即杀掉 cloudflared，借 exit 处理器重启拿到新地址并重新同步 DNS。
+function startTunnelWatchdog() {
+  let fails = 0;
+  setInterval(() => {
+    if (!tunnelState.enabled || !tunnelProc) return;
+    if (tunnelState.mode !== "quick") return; // 命名隧道地址恒定，无需回探
+    if (!tunnelState.tunnelUrl) return;
+    const probe = `${tunnelState.tunnelUrl}/pair?token=${encodeURIComponent(CFG.token || "")}`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    fetch(probe, { signal: ctrl.signal })
+      .then((r) => { fails = r.status < 500 ? 0 : fails + 1; })
+      .catch(() => { fails += 1; })
+      .finally(() => {
+        clearTimeout(timer);
+        if (fails >= 2) {
+          fails = 0;
+          log("tunnel-health-dead", { url: tunnelState.tunnelUrl });
+          try { tunnelProc.kill(); } catch { /* 已退出 */ }
+        }
+      });
+  }, 60000);
+}
+
 // ── main ────────────────────────────────────────────────────────────────
 httpServer.listen(CFG.port, CFG.host, () => {
   console.log(`[bridge] http://${CFG.host}:${CFG.port}`);
@@ -837,5 +864,6 @@ httpServer.listen(CFG.port, CFG.host, () => {
   console.log(`[bridge] 令牌即 URL 里的 hash 参数；日志: ${LOG_FILE}`);
   startNotifySubscription();
   startTunnel();
+  startTunnelWatchdog();
 });
 process.on("SIGINT", () => { try { backendProc && backendProc.kill(); } catch {} process.exit(0); });
