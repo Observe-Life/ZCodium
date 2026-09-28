@@ -785,6 +785,7 @@ function startTunnel() {
   const cfg = CFG.tunnel;
   if (!cfg || !cfg.enabled) return;
   tunnelState.enabled = true;
+  tunnelState.startedAt = Date.now(); // 供健康哨兵计算启动宽限期
   const dnsReady = Boolean(cfg.domain && cfg.subdomainId && cfg.dnsheKey && cfg.dnsheSecret);
   if (!cfg.cloudflaredPath || !dnsReady) {
     tunnelState.lastError = "tunnel-config-incomplete";
@@ -830,23 +831,25 @@ function startTunnel() {
 
 // ── 隧道健康哨兵 ─────────────────────────────────────────────────────────
 // 快速隧道会"僵而不死"：cloudflared 进程活着，但到 Cloudflare 边缘的连接已断、
-// 也不再吐新地址——exit 自愈管不到这种情况。哨兵每 60 秒从公网回探本机桥，
-// 连续 2 次失败即杀掉 cloudflared，借 exit 处理器重启拿到新地址并重新同步 DNS。
+// 也不再吐新地址——exit 自愈管不到这种情况。
+// 判活信号用 cloudflared 本机的 /ready 指标端口（默认 127.0.0.1:20241/ready，
+// 连接建立返回 200，未连返回非 2xx），**不走公网回探**——公网回探依赖本机 DNS，
+// 而 DNS 抽风时会把活隧道误判为死（上一版每 4 分钟误杀一次，反把模拟器连接打断）。
+// 启动后给 3 分钟宽限期；此后连续 3 次（每 60s 一次，共约 3 分钟）非 200 才重启。
 function startTunnelWatchdog() {
   let fails = 0;
   setInterval(() => {
     if (!tunnelState.enabled || !tunnelProc) return;
     if (tunnelState.mode !== "quick") return; // 命名隧道地址恒定，无需回探
-    if (!tunnelState.tunnelUrl) return;
-    const probe = `${tunnelState.tunnelUrl}/pair?token=${encodeURIComponent(CFG.token || "")}`;
+    if (Date.now() - (tunnelState.startedAt || 0) < 180000) return; // 启动宽限期
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 10000);
-    fetch(probe, { signal: ctrl.signal })
-      .then((r) => { fails = r.status < 500 ? 0 : fails + 1; })
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    fetch("http://127.0.0.1:20241/ready", { signal: ctrl.signal })
+      .then((r) => { fails = r.status === 200 ? 0 : fails + 1; })
       .catch(() => { fails += 1; })
       .finally(() => {
         clearTimeout(timer);
-        if (fails >= 2) {
+        if (fails >= 3) {
           fails = 0;
           log("tunnel-health-dead", { url: tunnelState.tunnelUrl });
           try { tunnelProc.kill(); } catch { /* 已退出 */ }
