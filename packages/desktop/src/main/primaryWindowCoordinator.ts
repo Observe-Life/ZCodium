@@ -44,15 +44,14 @@ export function createPrimaryWindowCoordinator(deps: PrimaryWindowCoordinatorDep
         continue;
       }
 
-      /* 用户主动触发的复用（双击图标/点击通知等）保留原有"带到前台"行为；
-         只把**远控/深链路径**的激活关掉（见 desktopOAuthDeepLink.ts 的说明）。 */
-      if (existingWindow.isMinimized?.()) {
-        existingWindow.restore?.();
-      }
-      if (!existingWindow.isVisible()) {
-        existingWindow.show();
-      }
-      existingWindow.focus?.();
+      /*
+       * 用户要求（2026-09-30）：任何外部触发都不得把 ZCodium 窗口自动带到前台。
+       * 实测根因链：手机打开会话 → 代理下发 desktop-command（打开工作区）→ 渲染层请求
+       * ActivateOrSetWorkspace，以及深链路径 ensurePrimaryWindow("open-url-workspace") 走到这里
+       * restore/show/focus，把正在用别的软件的用户反复强制切回。
+       * 因此此处**只复用窗口、不激活**；"双击桌面图标把窗口带到最前"由 second-instance 处理器里
+       * 的另一段内联激活负责（无路径的纯启动才会走到那里），notification/tray 等用户主动操作也不受影响。
+       */
       return true;
     }
 
