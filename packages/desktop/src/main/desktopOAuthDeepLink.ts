@@ -29,22 +29,12 @@ let pendingOpenWorkspaceRequest: {
 } | null = null;
 
 function focusDeepLinkTargetWindow(targetWindow: BrowserWindow): void {
-  // macOS 的 open-url 回调只会把 URL 投递给当前实例，不会自动把窗口带回前台。
-  // 之前这里只做了 IPC 转发，用户从系统服务打开目录后仍停留在外部应用。
-  // 这里在路由成功后显式激活并聚焦目标窗口，统一多平台回跳体验。
-  if (targetWindow.isMinimized()) {
-    targetWindow.restore();
-  }
-
-  if (!targetWindow.isVisible()) {
-    targetWindow.show();
-  }
-
-  if (process.platform === "darwin") {
-    app.show();
-  }
-
-  targetWindow.focus();
+  /*
+   * 用户要求（2026-09-30）：无论外部如何，都不允许自动把 ZCodium 窗口带到前台。
+   * 手机远控里"打开会话"等操作曾被这里 restore/show/focus，导致电脑在用别的软件时
+   * 被反复强制切回 ZCodium。此处改为**只做路由、不做任何窗口激活**（保留入参以维持调用契约）。
+   */
+  void targetWindow;
 }
 
 export function isValidLocalWorkspaceDirectory(path: string): boolean {

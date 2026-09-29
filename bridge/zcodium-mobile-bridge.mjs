@@ -462,8 +462,12 @@ class WindowSocket {
       mobileConnectionId: this.mobileConnectionId,
     }));
     conn.onmessage = (msg) => { log("window-recv", { d: String(msg).slice(0, 240) }); };
-    // 空闲保活：Cloudflare 边缘会把 2-3 分钟无数据的长连接掐断（实测页面"连接意外关闭"），20 秒一次心跳
-    this.pingTimer = setInterval(() => { try { conn.ping(); } catch {} }, 20000);
+    // 空闲保活：边缘按"有无数据帧"判空闲（协议 ping 不算数），每 25 秒补一个数据帧；
+    // 页面在拿到 ready 后已摘掉 message 监听，未知类型会被浏览器直接丢弃，无副作用。
+    this.pingTimer = setInterval(() => {
+      try { conn.sendText(JSON.stringify({ type: "keep-alive", t: Date.now() })); } catch {}
+      try { conn.ping(); } catch {}
+    }, 25000);
     conn.onclose = () => { clearInterval(this.pingTimer); log("window-close", {}); };
   }
 }
@@ -478,8 +482,11 @@ class WorkspaceRelay {
     this.dead = false;
     this.debugFrames = !!CFG.debugFrames;
     this.cmdWindow = []; // 会话命令时间戳（限流闸：防页面卡循环反复拉起桌面会话、把窗口顶回前台）
-    // 空闲保活：工作区 socket 每 20 秒一次协议心跳，避免经隧道时被边缘按空闲掐断
-    this.pingTimer = setInterval(() => { try { this.conn.ping(); } catch {} }, 20000);
+    // 空闲保活：工作区 socket 每 25 秒补一个"数据帧"（协议 KeepAlive=9，页面解码器只上抛 Regular，安全）
+    this.pingTimer = setInterval(() => {
+      try { this.toPage(9, Buffer.alloc(0)); } catch {}
+      try { this.conn.ping(); } catch {}
+    }, 25000);
     log("workspace-open", {});
 
     const ws = new WebSocket(CFG.backendWs);

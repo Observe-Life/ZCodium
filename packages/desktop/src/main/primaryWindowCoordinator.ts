@@ -44,13 +44,13 @@ export function createPrimaryWindowCoordinator(deps: PrimaryWindowCoordinatorDep
         continue;
       }
 
-      if (existingWindow.isMinimized?.()) {
-        existingWindow.restore?.();
-      }
-      if (!existingWindow.isVisible()) {
-        existingWindow.show();
-      }
-      existingWindow.focus?.();
+      /*
+       * 用户要求（2026-09-30）：任何外部触发都不得把 ZCodium 窗口自动带到前台。
+       * 原实现在这里 restore/show/focus 现有窗口，手机远控打开会话时会把正在别的软件里的用户
+       * 反复强制切回 ZCodium。改为**复用窗口但不做任何激活**（窗口是否可见/最前由用户自己决定）。
+       */
+      void existingWindow.isMinimized?.();
+      void existingWindow.isVisible();
       return true;
     }
 
