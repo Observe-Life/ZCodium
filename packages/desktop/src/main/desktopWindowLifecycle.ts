@@ -279,10 +279,12 @@ export function focusWorkspaceInExistingWindow(
 
     const existingWin = BrowserWindow.fromId(winId);
     if (existingWin && !existingWin.isDestroyed()) {
-      if (existingWin.isMinimized()) {
-        existingWin.restore();
-      }
-      existingWin.focus();
+      /*
+       * 用户要求（2026-09-30）：任何外部触发都不得把 ZCodium 窗口自动带到前台。
+       * 手机远控打开会话 → 这里 restore/focus 会把正在别处的用户反复强制切回（根因之一）。
+       * 该函数只在"该工作区已在某窗口打开"时被调用：用户主动在应用内切换时窗口本就在前台，
+       * 去掉激活没有任何体感损失；因此此处**只切标签、不激活窗口**。
+       */
       existingWin.webContents.send(PlatformChannels.FocusTab, path);
       return { activated: true, winId };
     }
