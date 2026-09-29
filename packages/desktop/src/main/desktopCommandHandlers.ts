@@ -402,7 +402,11 @@ export async function executeDesktopCommand(options: {
       targetWindow?.webContents.send(PlatformChannels.NewTask);
       return;
     case DesktopCommandIds.OpenWorkspace:
-      targetWindow?.webContents.send(PlatformChannels.OpenWorkspace);
+      /*
+       * 用户要求（2026-09-30）：外部（手机远控）不得驱动桌面端打开/切换界面。
+       * 这条 desktop-command 就是"手机点会话 → 电脑端跟着切界面并抢焦点"的总开关，
+       * 因此只保留命令日志与返回，不再转发给渲染层。
+       */
       return;
     case DesktopCommandIds.CloseActiveContext:
       targetWindow?.webContents.send(PlatformChannels.CloseActiveContextRequest);
