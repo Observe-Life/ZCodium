@@ -470,10 +470,16 @@ const httpServer = http.createServer(async (req, res) => {
     req.on("end", () => {
       let workspaceKey = "ws-local";
       try { const b = JSON.parse(body || "{}"); if (b.workspaceKey) workspaceKey = b.workspaceKey; } catch {}
+      /* 客户端可见源（2026-09-30 手机适配）：App 的本地转发层会附 X-ZP-Client-Origin=http://127.0.0.1:<port>，
+         此时 wsUrl 必须指回本机转发（页面只连 127.0.0.1 才稳定；否则页面拿到隧道域名直连公网、
+         直连失败率约 60%，工作区 socket 必现 error/1006 卡在"同步工作区"）。
+         仅认回环源（防远端伪造）。无该头（如电脑浏览器直连隧道）时维持旧行为。 */
+      const clientOrigin = String(req.headers["x-zp-client-origin"] || "").trim().replace(/\/$/, "");
       const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
       const isSecure = forwardedProto ? forwardedProto === "https" : Boolean(req.socket.encrypted);
-      const base = `${isSecure ? "wss" : "ws"}://${req.headers.host}`;
-      const wsBase = base.replace(/^http/, "ws").replace(/\/$/, "");
+      const wsBase = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(clientOrigin)
+        ? clientOrigin.replace(/^http/i, "ws")
+        : `${isSecure ? "wss" : "ws"}://${req.headers.host}`.replace(/\/$/, "");
       return json(res, 200, {
         wsUrl: `${wsBase}/ws/remote-control/workspace/${CFG.token}`,
         bridgeSessionId: "bridge-" + crypto.randomUUID(),
