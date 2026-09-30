@@ -190,7 +190,10 @@ test("workspace routing preserves consent, readiness, window isolation and close
     h.calls.filter(([event]) => event === "send"),
     [["send", 1, shared.PlatformChannels.OpenWorkspacePath, h.directory]],
   );
-  assert.ok(h.calls.some(([event, id]) => event === "focus" && id === 1));
+  // 契约更新（2026-09-30 用户指令）：深链/远控打开工作区**不得激活或前置窗口**（曾致"手机点会话把
+  // 电脑端反复顶回前台"）。custom 分支已把 focusDeepLinkTargetWindow/focusWorkspaceInExistingWindow
+  // 的去激活（仅保留 FocusTab 消息）；本断言相应反转为"绝不 focus"。
+  assert.ok(!h.calls.some(([event]) => event === "focus"));
   h.router.clearWorkspaceDeepLinkStateForWindow(1);
   h.calls.length = 0;
   h.router.handleDeepLink(h.link, h.logger);
