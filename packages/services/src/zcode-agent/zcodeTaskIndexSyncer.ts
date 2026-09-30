@@ -541,6 +541,52 @@ export function createZCodeTaskIndexSyncer(
     };
   }
 
+  // ── 外部进程写入感知（2026-09-30 根因修复）──
+  // 背景：web 部署态（手机远控链路）是独立进程，其会话写入共享 tasks-index 后，
+  // 桌面端本进程的 workspace_task_list_changed 广播只由本进程自身事件触发，
+  // 手机新建的会话要等到桌面端重启才会出现在左侧列表。
+  // 方案：低频扫描共享库的 timeline 签名，变化即走既有 emitWorkspaceTaskListChanged
+  // （reason=realtime_sync）广播一次；UI 沿既有订阅链路重拉 listTaskList（查询本身
+  // 是实时读库），新会话即时出现。代价为每 workspace 每 5 秒一条轻量只读 SQL，
+  // 首轮只记基线不触发，异常静默跳过，不影响主链路。
+  const externalSweepSignatures = new Map<string, string>();
+  async function sweepExternalTaskIndexChanges(): Promise<void> {
+    if (disposed) {
+      return;
+    }
+    for (const state of workspaceIngests.values()) {
+      if (disposed) {
+        return;
+      }
+      try {
+        const result = await taskIndexRepo.queryTaskList({
+          kind: "timeline",
+          workspaceScopes: [
+            {
+              workspacePath: state.target.workspacePath,
+              ...(state.target.workspaceIdentity ? { workspaceIdentity: state.target.workspaceIdentity } : {}),
+            },
+          ],
+          sortBy: "updated",
+          limit: 200,
+        });
+        const key = resolveWorkspaceKey(state.target);
+        const signature = `${result.total}|${JSON.stringify(result.items)}`;
+        const previous = externalSweepSignatures.get(key);
+        externalSweepSignatures.set(key, signature);
+        if (previous !== undefined && previous !== signature) {
+          emitWorkspaceTaskListChanged(state.target, undefined, "realtime_sync");
+        }
+      } catch {
+        // 扫描失败不打断主链路，下一轮重试。
+      }
+    }
+  }
+  const externalSweepTimer = setInterval(() => {
+    void sweepExternalTaskIndexChanges();
+  }, 5000);
+  externalSweepTimer.unref?.();
+
   function broadcastTargetFrom(target: ZCodeAgentSessionTarget): WorkspaceBroadcastTarget {
     return {
       workspacePath: target.workspacePath,
@@ -1780,6 +1826,7 @@ export function createZCodeTaskIndexSyncer(
 
     disposeAll(): void {
       disposed = true;
+      clearInterval(externalSweepTimer);
       for (const state of workspaceIngests.values()) {
         state.indexSubscriptionGeneration += 1;
         state.configSubscriptionGeneration += 1;
