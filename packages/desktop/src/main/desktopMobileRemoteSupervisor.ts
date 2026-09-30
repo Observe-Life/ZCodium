@@ -8,15 +8,17 @@ import type { ISettingService } from "@zcode/services";
 /**
  * ZCodium 自用版增强功能：手机远控托管（custom 分支）。
  *
- * 职责：跟随 setting.json 的 `mobileRemoteControl` 期望态，拉起并守护两个纯 Node 子进程
- * （`zcode --web` 后端 + zcodium-mobile-bridge），退出/关开关/改配置时整体回收。
+ * 职责：跟随 setting.json 的 `mobileRemoteControl` 期望态，拉起并守护桥子进程
+ * （zcodium-mobile-bridge），退出/关开关/改配置时整体回收。同进程直连改造
+ * （2026-09-30）后不再拉起独立 `zcode --web` 后端——手机数据面由桌面 host 内的
+ * mobileRpcBridgeServer 承载（见 host/index.ts syncMobileRpcBridge）。
  * 子进程用 Electron 自带 Node 运行时（ELECTRON_RUN_AS_NODE=1）执行，不依赖系统安装 node。
  * 轮询 settingService.get()（每次读盘）作为唯一触发源，渲染层保存设置最迟 5 秒生效。
  */
 
-/** 后端固定端口；桥的 backendHttp/backendWs 默认与之匹配。 */
-const BACKEND_PORT = 3030;
+/** 桥默认端口；桌面 host RPC 桥服务端口见 host/mobileRpcBridgeServer（4311，与桥 desktopUrl 对齐）。 */
 const DEFAULT_BRIDGE_PORT = 4310;
+const MOBILE_RPC_URL = "ws://127.0.0.1:4311/mobile-rpc";
 const SYNC_INTERVAL_MS = 5_000;
 const RESTART_BACKOFF_MS = 5_000;
 
@@ -32,7 +34,7 @@ interface MobileRemoteSupervisorDeps {
 export interface MobileRemoteSupervisorHandle {
   /** 强制一次同步（设置保存后可调用；轮询本身也会兜底）。 */
   sync(): void;
-  /** app 退出前回收后端与桥的整个进程树。 */
+  /** app 退出前回收桥进程树（数据面在 host 内，随 host 自身回收）。 */
   dispose(): Promise<void>;
 }
 
@@ -48,9 +50,7 @@ interface TunnelDesiredState {
 interface DesiredState {
   token: string;
   port: number;
-  backendCliPath: string;
   workspacePath: string;
-  dataBaseDir?: string;
   tunnel: TunnelDesiredState | null;
 }
 
@@ -67,7 +67,6 @@ function resolveBridgeScriptPath(): string | null {
 export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): MobileRemoteSupervisorHandle {
   let disposed = false;
   let syncing = false;
-  let backendChild: ChildProcess | null = null;
   let bridgeChild: ChildProcess | null = null;
   let lastDesiredKey = "";
   let restartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -96,9 +95,7 @@ export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): M
   };
 
   const stopAll = (): void => {
-    stopChild(backendChild);
     stopChild(bridgeChild);
-    backendChild = null;
     bridgeChild = null;
   };
 
@@ -112,7 +109,7 @@ export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): M
   };
 
   const spawnNode = (
-    label: "backend" | "bridge",
+    label: "bridge",
     script: string,
     args: string[],
     extraEnv: Record<string, string | undefined>,
@@ -125,14 +122,12 @@ export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): M
       });
       child.once("exit", (code) => {
         deps.logger.info(`[mobile-remote] ${label} exited code=${code ?? "null"}`);
-        if (label === "backend") backendChild = null;
-        else bridgeChild = null;
+        bridgeChild = null;
         if (!disposed) scheduleSync();
       });
       child.once("error", (error) => {
         deps.logger.warn(`[mobile-remote] ${label} spawn error:`, error);
-        if (label === "backend") backendChild = null;
-        else bridgeChild = null;
+        bridgeChild = null;
         if (!disposed) scheduleSync();
       });
       deps.logger.info(`[mobile-remote] ${label} started pid=${child.pid ?? "?"}`);
@@ -152,9 +147,7 @@ export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): M
     return {
       token,
       port: m.port && m.port > 0 ? m.port : DEFAULT_BRIDGE_PORT,
-      backendCliPath: m.backendCliPath?.trim() ?? "",
       workspacePath: m.workspacePath?.trim() ?? "",
-      dataBaseDir: settings.dataBaseDir?.trim() || undefined,
       tunnel:
         m.tunnel?.enabled === true
           ? {
@@ -177,21 +170,16 @@ export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): M
         try {
           const desired = await readDesired();
           if (!desired) {
-            if (backendChild || bridgeChild) {
+            if (bridgeChild) {
               deps.logger.info("[mobile-remote] disabled: reclaiming children");
               stopAll();
             }
             lastDesiredKey = "";
             return;
           }
-          if (
-            !desired.backendCliPath ||
-            !existsSync(desired.backendCliPath) ||
-            !desired.workspacePath ||
-            !existsSync(desired.workspacePath)
-          ) {
+          if (!desired.workspacePath || !existsSync(desired.workspacePath)) {
             deps.logger.warn(
-              "[mobile-remote] enabled but backend CLI path or workspace missing; waiting for settings",
+              "[mobile-remote] enabled but workspace missing; waiting for settings",
             );
             stopAll();
             return;
@@ -205,34 +193,13 @@ export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): M
           const tunnelKey = desired.tunnel
             ? `${desired.tunnel.domain}|${desired.tunnel.subdomainId}|${desired.tunnel.dnsheKey ? "k" : ""}${desired.tunnel.dnsheSecret ? "s" : ""}|${desired.tunnel.cloudflaredPath}`
             : "off";
-          const key = `${desired.token}|${desired.port}|${desired.backendCliPath}|${desired.workspacePath}|${tunnelKey}`;
+          const key = `${desired.token}|${desired.port}|${desired.workspacePath}|${tunnelKey}`;
           if (key !== lastDesiredKey) {
             if (lastDesiredKey !== "") {
               // 配置变更（含换令牌/端口/工作区）整体重建，避免桥与旧参数不一致。
               stopAll();
             }
             lastDesiredKey = key;
-          }
-          if (!backendChild) {
-            backendChild = spawnNode(
-              "backend",
-              desired.backendCliPath,
-              [
-                "--web",
-                "--workspace",
-                desired.workspacePath,
-                "--port",
-                String(BACKEND_PORT),
-                "--no-open",
-              ],
-              desired.dataBaseDir
-                ? {
-                    ZCODE_DATA_BASE_DIR: desired.dataBaseDir,
-                    // 关键：让手机链路的后端与桌面端共用同一份 .zcodium 数据（会话/任务一致、新建可用）。
-                    ZCODE_DESKTOP_HOME_DIR: desired.dataBaseDir,
-                  }
-                : {},
-            );
           }
           if (!bridgeChild) {
             bridgeChild = spawnNode("bridge", bridgeScript, [], {
@@ -241,6 +208,9 @@ export function startMobileRemoteSupervisor(deps: MobileRemoteSupervisorDeps): M
               BRIDGE_HOST: "127.0.0.1",
               BRIDGE_PORT: String(desired.port),
               BRIDGE_WORKSPACE: desired.workspacePath,
+              // 同进程直连改造：数据面=桌面 host 内的手机 RPC 桥（token 与配对令牌同源）。
+              BRIDGE_DESKTOP_URL: MOBILE_RPC_URL,
+              BRIDGE_DESKTOP_TOKEN: desired.token,
               ...(desired.tunnel
                 ? {
                     BRIDGE_TUNNEL: "1",

@@ -2,8 +2,10 @@
 /*
  * zcodium-mobile-bridge.mjs — ZCodium 手机远控桥（C2 方案，custom 分支单文件）
  *
- * 角色：同时扮演官方架构里的「云中继」与「桌面主机连接入口」：
- *   手机页面(remote/v4) ⇄ [本桥] ⇄ zcode --web (127.0.0.1 后端 /ws)
+ * 角色：手机远控的「运输面」——隧道、配对令牌、页面静态资源、v4 协议封装；
+ *   手机页面(remote/v4) ⇄ [本桥] ⇄ 桌面端 host 本地 RPC 桥服务(127.0.0.1:4311)
+ * （2026-09-30 同进程直连改造：数据面不再经独立 `zcode --web` 后端，手机与桌面 UI
+ *   复用同一批 host 服务实例——一本账、一份事件源。）
  * 协议依据（2026-09-26 静态提取，见 项目资源/ZCodium手机远控Phase0通道映射表.md 附录 B）：
  *   - 握手: auth_challenge{nonce} → auth_response{device_sid, proof, client_ts} → auth_ack{pair_status}
  *     proof = base64url(HMAC-SHA256(key=hash, msg=`${nonce}|terminal|${device_sid}`))
@@ -20,7 +22,6 @@ import http from "node:http";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,21 +35,20 @@ function loadConfig() {
     host: "127.0.0.1",
     token: null, // 配对令牌（= hash 参数；REST/WS 校验）
     sid: "d_zcodium_" + crypto.randomBytes(6).toString("hex"),
-    backendHttp: "http://127.0.0.1:3030",
+    backendHttp: "http://127.0.0.1:3030", // 已退役（同进程直连改造后仅留注释位，不再连接）
     backendWs: "ws://127.0.0.1:3030/ws",
+    desktopUrl: "ws://127.0.0.1:4311/mobile-rpc", // 桌面端 host 本地 RPC 桥服务
+    desktopToken: null, // 缺省与配对令牌 CFG.token 同值（supervisor 可经 BRIDGE_DESKTOP_TOKEN 覆盖）
     snapshotDir: path.join(HERE, "remote_v4"),
     workspacePath: process.cwd(),
     workspaceLabel: "ZCodium",
     publicBaseUrl: null, // 例如 https://xx.de5.net（隧道时设置；缺省按请求 Host）
     logDir: path.join(HERE, "logs"),
     debugFrames: false,
-    // 任务列表就地应答：后端（CLI）与桌面端的数据根不一致时，桥直接读桌面端的任务索引作答。
-    tasksIndexPath: "D:\\ZCodium\\.zcodium\\v2\\tasks-index.sqlite",
     provider: "glm",
     // Server酱³ 推送（沿用既有配置；enabled 由该文件控制）
     notifyConfigPath: "C:\\Users\\Bingcan Lin\\AppData\\Local\\ZCode\\serverchan-notify.json",
     debugAgent: false, // 临时：抓取 zcode-agent 请求与事件结构（BRIDGE_DEBUG_AGENT=1）
-    spawnBackend: null, // 例如 { command:"node", args:["...zcode.cjs","--web",...] }（增强功能开关接入后由桌面端托管）
     // 公网隧道（Phase 4）：cloudflared 快速隧道 + DNSHE 固定域名同步；由桌面端 supervisor 透传。
     tunnel: null, // { enabled, domain, subdomainId, dnsheKey, dnsheSecret, cloudflaredPath }
   };
@@ -62,6 +62,8 @@ function loadConfig() {
   if (process.env.BRIDGE_DEBUG_AGENT) cfg.debugAgent = process.env.BRIDGE_DEBUG_AGENT === "1";
   if (process.env.BRIDGE_WORKSPACE) cfg.workspacePath = process.env.BRIDGE_WORKSPACE;
   if (process.env.BRIDGE_HOST) cfg.host = process.env.BRIDGE_HOST;
+  if (process.env.BRIDGE_DESKTOP_URL) cfg.desktopUrl = process.env.BRIDGE_DESKTOP_URL;
+  if (process.env.BRIDGE_DESKTOP_TOKEN) cfg.desktopToken = process.env.BRIDGE_DESKTOP_TOKEN;
   if (process.env.BRIDGE_TUNNEL === "1") {
     cfg.tunnel = {
       enabled: true,
@@ -150,75 +152,153 @@ function rpcParseFrame(buf) {
   return { header: h.value, body: b.value };
 }
 
-// ── 任务列表就地应答（读桌面端任务索引）────────────────────────────────
-function queryTasks(indexPath, kind, workspacePath) {  const db = new DatabaseSync(indexPath, { readOnly: true });
-  try {
-    // 只按工作区过滤：provider 字段会随用户换模型而变，带着它会漏列会话（r6）。
-    const where = ["workspace_key = ?"];
-    const params = [workspacePath];
-    if (kind === "listTasks") { where.push("pinned = 0", "archived = 0", "deleted = 0"); }
-    if (kind === "listPinnedTasks") { where.push("pinned = 1", "archived = 0", "deleted = 0"); }
-    if (kind === "listArchivedTasks") { where.push("archived = 1"); }
-    const rows = db.prepare(`SELECT meta_json FROM tasks WHERE ${where.join(" AND ")} ORDER BY updated_at DESC`).all(...params);
-    return rows.map((r) => { try { return JSON.parse(r.meta_json); } catch { return null; } }).filter(Boolean);
-  } finally { try { db.close(); } catch {} }
-}
-
-// window-controller 通道：任务列表（页面首页/侧栏的真实数据源）
-// kind 语义对齐桌面端 Lc()：pinned=置顶且未归档；archived=已归档；timeline=未置顶未归档；active=未归档。
-function queryTaskRows(indexPath, kind, workspacePath) {
-  const db = new DatabaseSync(indexPath, { readOnly: true });
-  try {
-    const where = ["workspace_key = ?", "deleted = 0"];
-    const params = [workspacePath];
-    if (kind === "pinned") where.push("pinned = 1", "archived = 0");
-    else if (kind === "archived") where.push("archived = 1");
-    else if (kind === "active") where.push("archived = 0");
-    else where.push("pinned = 0", "archived = 0"); // timeline（默认）
-    const rows = db.prepare(`SELECT meta_json, pinned, archived FROM tasks WHERE ${where.join(" AND ")} ORDER BY updated_at DESC`).all(...params);
-    return rows.map((r) => {
-      let meta = null;
-      try { meta = JSON.parse(r.meta_json); } catch { /* 坏行跳过 */ }
-      return meta ? { meta, pinned: r.pinned === 1, archived: r.archived === 1 } : null;
-    }).filter(Boolean);
-  } finally { try { db.close(); } catch {} }
-}
-
-// 按桌面端 buildSourceRows 的线上形状组装任务项（address/meta/membership/sourceAvailability/liveStatus）
-function buildTaskListPayload(args) {
-  const scopes = Array.isArray(args.workspaceScopes) && args.workspaceScopes.length
-    ? args.workspaceScopes
-    : [{ workspacePath: CFG.workspacePath }];
-  const kind = args.kind || "timeline";
-  const limit = typeof args.limit === "number" && args.limit > 0 ? args.limit : 200;
-  const items = [];
-  for (const scope of scopes) {
-    const wsPath = scope.workspacePath || CFG.workspacePath;
-    for (const row of queryTaskRows(CFG.tasksIndexPath, kind, wsPath)) {
-      const m = row.meta;
-      const address = { taskId: m.taskId, workspacePath: m.workspacePath || wsPath };
-      if (m.workspaceIdentity || scope.workspaceIdentity) address.workspaceIdentity = m.workspaceIdentity || scope.workspaceIdentity;
-      items.push({
-        address,
-        meta: m,
-        membership: { pinned: row.pinned, archived: row.archived, active: !row.archived },
-        sourceAvailability: "online",
-        liveStatus: m.status === "completed" ? "completed" : m.status === "error" ? "error" : "idle",
-      });
+// ── desktopLink：桌面端 host 本地 RPC 桥（同进程直连改造，替代独立后端 /ws）────
+// 协议：call/listen/unlisten → res/err/evt（见 host/mobileRpcBridgeServer.ts）。
+// 断线：pending 全部快速失败、事件表清空、onDown 通知上层（页面连接随之下线重连重订阅）。
+const DIRECT_LISTEN = new Set([
+  "zcode-agent.onAgentRuntimeLifecycle",
+  "zcode-agent.onAgentRuntimeRestarted",
+  "broadcast.onMessage",
+  "model-selection.onDidChange",
+  "provider-settings.onDidChange",
+]);
+const desktopLink = (() => {
+  const token = CFG.desktopToken || CFG.token;
+  let ws = null;
+  let seq = 0;
+  let closed = false;
+  const pending = new Map(); // linkId -> {resolve, reject, timer}
+  const evtHandlers = new Map(); // listenId -> (data)=>void
+  const downCallbacks = new Set();
+  const openWaiters = new Set();
+  const connected = () => Boolean(ws && ws.readyState === 1);
+  function stringifyFrame(frame) {
+    return JSON.stringify(frame, (_k, v) =>
+      Buffer.isBuffer(v) || v instanceof Uint8Array ? { __b64: Buffer.from(v).toString("base64") } : v,
+    );
+  }
+  function sendRaw(frame) {
+    if (!connected()) return false;
+    try {
+      ws.send(stringifyFrame(frame));
+      return true;
+    } catch {
+      return false;
     }
   }
-  return { items: items.slice(0, limit), total: items.length, hasMore: items.length > limit };
-}
-
-// 任务项签名（增量比对用）：标题/时间/置顶/归档/状态任一变化即视为更新
-function taskSignature(items) {
-  const m = new Map();
-  for (const it of items) {
-    const a = it.address || {};
-    m.set(String(a.taskId), [it.meta && it.meta.title, it.meta && it.meta.updatedAt, it.membership && it.membership.pinned ? 1 : 0, it.membership && it.membership.archived ? 1 : 0, it.liveStatus].join("|"));
+  function ensureOpen(timeoutMs) {
+    if (connected()) return Promise.resolve();
+    return new Promise((res, rej) => {
+      const timer = setTimeout(() => {
+        openWaiters.delete(onOpen);
+        rej(new Error("desktop-link-timeout"));
+      }, timeoutMs);
+      const onOpen = () => {
+        clearTimeout(timer);
+        openWaiters.delete(onOpen);
+        res();
+      };
+      openWaiters.add(onOpen);
+    });
   }
-  return m;
-}
+  function connect() {
+    if (closed) return;
+    try {
+      ws = new WebSocket(CFG.desktopUrl, { headers: { authorization: `Bearer ${token}` } });
+    } catch (error) {
+      log("desktop-link-connect-error", { msg: String(error).slice(0, 160) });
+      setTimeout(connect, 3000);
+      return;
+    }
+    ws.binaryType = "arraybuffer";
+    ws.addEventListener("open", () => {
+      log("desktop-link-open", {});
+      for (const cb of [...openWaiters]) {
+        try { cb(); } catch {}
+      }
+    });
+    ws.addEventListener("message", (ev) => {
+      let f;
+      try {
+        f = JSON.parse(typeof ev.data === "string" ? ev.data : Buffer.from(ev.data).toString("utf8"));
+      } catch {
+        return;
+      }
+      if (!f || typeof f !== "object") return;
+      if (f.t === "evt") {
+        const h = evtHandlers.get(f.listenId);
+        if (h) {
+          try { h(f.data); } catch (e) { log("desktop-link-evt-error", { msg: String(e).slice(0, 160) }); }
+        }
+        return;
+      }
+      const w = pending.get(f.id);
+      if (!w) return;
+      pending.delete(f.id);
+      clearTimeout(w.timer);
+      if (f.t === "res") w.resolve(f.data);
+      else w.reject(new Error(String(f.msg || "rpc-error").slice(0, 200)));
+    });
+    const down = () => {
+      for (const [id, w] of pending) {
+        pending.delete(id);
+        clearTimeout(w.timer);
+        w.reject(new Error("desktop-link-down"));
+      }
+      evtHandlers.clear();
+      for (const cb of [...downCallbacks]) {
+        try { cb(); } catch {}
+      }
+      if (!closed) setTimeout(connect, 3000);
+    };
+    ws.addEventListener("close", down);
+    ws.addEventListener("error", () => { /* close 事件统一处理 */ });
+  }
+  function call(ch, me, args, timeoutMs = 10000) {
+    return ensureOpen(6000).then(
+      () =>
+        new Promise((res, rej) => {
+          const id = ++seq;
+          const timer = setTimeout(() => {
+            pending.delete(id);
+            rej(new Error(`desktop-link-timeout:${ch}.${me}`));
+          }, timeoutMs);
+          pending.set(id, { resolve: res, reject: rej, timer });
+          if (!sendRaw({ t: "call", id, ch, me, args })) {
+            clearTimeout(timer);
+            pending.delete(id);
+            rej(new Error("desktop-link-down"));
+          }
+        }),
+    );
+  }
+  function listen(ch, me, args, handler) {
+    return ensureOpen(6000).then(() => {
+      const id = ++seq;
+      const mode = DIRECT_LISTEN.has(ch + "." + me) ? "direct" : "curried";
+      if (!sendRaw({ t: "listen", id, ch, me, args, mode })) throw new Error("desktop-link-down");
+      evtHandlers.set(id, handler);
+      return id;
+    });
+  }
+  function unlisten(id) {
+    if (typeof id === "number" && id > 0) {
+      sendRaw({ t: "unlisten", id });
+      evtHandlers.delete(id);
+    }
+  }
+  connect();
+  return {
+    call,
+    listen,
+    unlisten,
+    connected,
+    onDown(cb) {
+      downCallbacks.add(cb);
+      return () => downCallbacks.delete(cb);
+    },
+  };
+})();
 
 // ── 极简 WebSocket 服务器（RFC6455，文本帧为主，支持分片/ping/close）────
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -323,41 +403,40 @@ function pairingUrl(req) {
 function workspacesPayload() {
   return [{ workspaceKey: CFG.workspacePath, workspacePath: CFG.workspacePath, label: CFG.workspaceLabel, kind: "local" }];
 }
-// 手机首页列表的数据源：bootstrap 的 tasks 必须带真实任务（页面按 workspaceIdentity||workspacePath 分组）
-function tasksPayload() {
-  const db = new DatabaseSync(CFG.tasksIndexPath, { readOnly: true });
+// 手机首页列表的数据源：同进程直连后取自桌面端 window-controller 服务（与桌面 UI 同一数据源）。
+// 桌面端未就绪时返回空表——页面随后经 controller/tasks-index 订阅快照补齐，不影响可用性。
+async function tasksPayload() {
   try {
-    const rows = db.prepare(
-      "SELECT meta_json, pinned, archived, unread_at FROM tasks WHERE workspace_key = ? AND deleted = 0 ORDER BY updated_at DESC LIMIT 200",
-    ).all(CFG.workspacePath);
-    const out = [];
-    for (const r of rows) {
-      let m = null;
-      try { m = JSON.parse(r.meta_json); } catch { /* 坏行跳过 */ }
-      if (!m || !m.taskId) continue;
-      out.push({
-        taskId: m.taskId,
-        title: m.title || m.taskId,
-        workspacePath: m.workspacePath || CFG.workspacePath,
-        ...(m.workspaceIdentity ? { workspaceIdentity: m.workspaceIdentity } : {}),
-        pinned: r.pinned === 1,
-        archived: r.archived === 1,
-        createdAt: m.createdAt,
-        updatedAt: m.updatedAt,
-        // 页面以 typeof unreadAt==='number' 判未读，0 不能下发（会把全部标成未读）
-        ...(typeof r.unread_at === "number" && r.unread_at > 0 ? { unreadAt: r.unread_at } : {}),
-        ...(m.status ? { status: m.status } : {}),
-        ...(m.provider ? { provider: m.provider } : {}),
+    const result = await desktopLink.call("window-controller", "listTaskList", [
+      { kind: "timeline", workspaceScopes: [{ workspacePath: CFG.workspacePath }], sortBy: "updated", limit: 200 },
+    ], 6000);
+    const items = Array.isArray(result && result.items) ? result.items : [];
+    return items
+      .filter((it) => it && it.meta && it.meta.taskId)
+      .map((it) => {
+        const m = it.meta;
+        return {
+          taskId: m.taskId,
+          title: m.title || m.taskId,
+          workspacePath: m.workspacePath || CFG.workspacePath,
+          ...(m.workspaceIdentity ? { workspaceIdentity: m.workspaceIdentity } : {}),
+          pinned: !!(it.membership && it.membership.pinned),
+          archived: !!(it.membership && it.membership.archived),
+          createdAt: m.createdAt,
+          updatedAt: m.updatedAt,
+          // 页面以 typeof unreadAt==='number' 判未读，0 不下发（会把全部标成未读）
+          ...(typeof m.unreadAt === "number" && m.unreadAt > 0 ? { unreadAt: m.unreadAt } : {}),
+          ...(m.status ? { status: m.status } : {}),
+          ...(m.provider ? { provider: m.provider } : {}),
+        };
       });
-    }
-    return out;
   } catch (e) {
     log("tasks-payload-error", { msg: String(e).slice(0, 160) });
     return [];
-  } finally { try { db.close(); } catch {} }
+  }
 }
 
-const httpServer = http.createServer((req, res) => {
+const httpServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://x");
   const p = url.pathname;
   if (req.method === "OPTIONS") { res.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-headers": "*" }); return res.end(); }
@@ -382,7 +461,7 @@ const httpServer = http.createServer((req, res) => {
   let m;
   if ((m = p.match(/^\/api\/remote-control\/windows\/bootstrap\/([^/]+)$/))) {
     if (m[1] !== CFG.token) return json(res, 401, { error: "unauthorized" });
-    return json(res, 200, { workspaces: workspacesPayload(), tasks: tasksPayload(), initialViewState: { activeWorkspaceKey: CFG.workspacePath, updatedAt: Date.now() }, mobileViewState: { activeWorkspaceKey: CFG.workspacePath, updatedAt: Date.now() } });
+    return json(res, 200, { workspaces: workspacesPayload(), tasks: await tasksPayload(), initialViewState: { activeWorkspaceKey: CFG.workspacePath, updatedAt: Date.now() }, mobileViewState: { activeWorkspaceKey: CFG.workspacePath, updatedAt: Date.now() } });
   }
   if ((m = p.match(/^\/api\/remote-control\/windows\/([^/]+)\/workspace-bridge$/)) && req.method === "POST") {
     if (m[1] !== CFG.token) return json(res, 401, { error: "unauthorized" });
@@ -472,53 +551,23 @@ class WindowSocket {
   }
 }
 
-// ── 工作区 socket：持久层（id/ack/KeepAlive）服务端 + 后端 /ws 直通 ─────
+// ── 工作区 socket：持久层（id/ack/KeepAlive）服务端 + 数据面 desktopLink 直通 ─────
 class WorkspaceRelay {
   constructor(conn) {
     this.conn = conn;
-    this.backend = null;
     this.lastPageId = 0; // 页面发来的最大 id，用于回 ack
     this.outId = 0;      // 桥发往页面的 id
     this.dead = false;
     this.debugFrames = !!CFG.debugFrames;
-    this.cmdWindow = []; // 会话命令时间戳（限流闸：防页面卡循环反复拉起桌面会话、把窗口顶回前台）
+    this.cmdWindow = []; // 会话命令时间戳（限流闸：防页面卡循环反复拉起桌面会话）
+    this.linkListens = new Map(); // 页面 EventListen rid → desktopLink listenId
     // 空闲保活：工作区 socket 每 25 秒补一个"数据帧"（协议 KeepAlive=9，页面解码器只上抛 Regular，安全）
     this.pingTimer = setInterval(() => {
       try { this.toPage(9, Buffer.alloc(0)); } catch {}
       try { this.conn.ping(); } catch {}
     }, 25000);
     log("workspace-open", {});
-
-    const ws = new WebSocket(CFG.backendWs);
-    ws.binaryType = "arraybuffer";
-    this.backend = ws;
-    ws.addEventListener("open", () => log("backend-open", {}));
-    ws.addEventListener("message", (ev) => {
-      const buf = Buffer.from(ev.data);
-      if (buf.length < 13) return;
-      const len = buf.readUInt32BE(9);
-      if (buf.length < 13 + len) return;
-      const body = buf.subarray(13, 13 + len);
-      if (this.debugFrames) log("ws-res", { len: body.length, head: body.subarray(0, 24).toString("hex") });
-      if (CFG.debugAgent && body.length > 13) {
-        try {
-          const p = rpcParseFrame(body);
-          const [tc] = p.header || [];
-          if (tc === 204) {
-            const s = JSON.stringify(p.body);
-            if (s.includes("sessions-index")) {
-              fs.writeFileSync(path.join(HERE, "sessions_index_dump.json"), s);
-              log("agent-event", { head: JSON.stringify(p.header), dumped: s.length });
-            } else {
-              log("agent-event", { head: JSON.stringify(p.header), body: s.slice(0, 700) });
-            }
-          }
-        } catch {}
-      }
-      this.toPage(1, body); // 持久层只向上传 Regular，统一以 Regular 转发（含后端的 Control/initialize 载荷）
-    });
-    ws.addEventListener("close", () => this.teardown("backend-close"));
-    ws.addEventListener("error", () => log("backend-error", {}));
+    this.offLinkDown = desktopLink.onDown(() => this.teardown("desktop-link-down"));
 
     conn.onmessage = (msg) => {
       if (typeof msg === "string") { log("workspace-text", { d: msg.slice(0, 160) }); return; }
@@ -528,21 +577,26 @@ class WorkspaceRelay {
       const id = buf.readUInt32BE(1);
       const len = buf.readUInt32BE(9);
       const body = buf.subarray(13, 13 + len);
-      if (type === 1) { // Regular：任务列表就地应答，其余转给后端；均立即回 Ack
+      if (type === 1) { // Regular：RPC 帧统一改道 desktopLink；均立即回 Ack
         this.lastPageId = Math.max(this.lastPageId, id);
         if (this.debugFrames) log("ws-req", { len: body.length, head: body.subarray(0, 24).toString("hex") });
-        // 全帧头日志：看清页面在每个阶段发出的 RPC（tcode/channel/method），订阅/事件监听的形状靠它实测
-        try {
-          const p = rpcParseFrame(body);
-          const [tc, rid, ch, me] = p.header || [];
-          log("rpc-in", { tc, rid, ch, me, len: body.length });
-        } catch { /* 非 RPC 帧忽略 */ }
-        if (CFG.debugAgent) {
-          try { const p = rpcParseFrame(body); const [tc, rid2, ch, me] = p.header || []; if (ch === "zcode-agent" && (me === "initializeConversationV4" || me === "subscribeSessionsIndexV4")) { fs.writeFileSync(path.join(HERE, `handshake_${me}.json`), JSON.stringify(p.body)); log("handshake-captured", { me }); } } catch {}
-        }
-        if (this.shouldDropFlood(body)) { this.toPage(3, Buffer.alloc(0), id); return; }
-        if (!this.tryLocalTaskList(body)) this.toBackend(body);
+        let p = null;
+        try { p = rpcParseFrame(body); } catch { /* 非 RPC 帧忽略 */ }
+        const header = p && Array.isArray(p.header) ? p.header : null;
         this.toPage(3, Buffer.alloc(0), id);
+        if (!header) return;
+        const [tc, rid, ch, me] = header;
+        log("rpc-in", { tc, rid, ch, me, len: body.length });
+        if (tc === 100) {
+          if (this.shouldDropFlood(tc, ch, me)) return;
+          this.forwardCall(rid, ch, me, p.body);
+        } else if (tc === 102) {
+          this.forwardListen(rid, ch, me, p.body);
+        } else if (tc === 103) {
+          const lid = this.linkListens.get(rid);
+          this.linkListens.delete(rid);
+          if (typeof lid === "number") desktopLink.unlisten(lid);
+        }
         return;
       }
       if (type === 9) { this.toPage(9, Buffer.alloc(0)); return; } // KeepAlive → 回 KeepAlive
@@ -552,101 +606,55 @@ class WorkspaceRelay {
     };
     conn.onclose = () => this.teardown("page-close");
   }
-  toBackend(body) {
-    if (!this.backend || this.backend.readyState !== 1) return;
-    const head = Buffer.alloc(13);
-    head.writeUInt8(1, 0);
-    head.writeUInt32BE(0, 1);
-    head.writeUInt32BE(0, 5);
-    head.writeUInt32BE(body.length, 9);
-    this.backend.send(Buffer.concat([head, body]));
+  // Promise 型 RPC：desktopLink 结果封装为 201/202 帧回页面（错误体形状与旧链路一致）
+  forwardCall(rid, ch, me, args) {
+    if (CFG.debugAgent && ch === "zcode-agent" && (me === "initializeConversationV4" || me === "subscribeSessionsIndexV4")) {
+      try { fs.writeFileSync(path.join(HERE, `handshake_${me}.json`), JSON.stringify(args)); log("handshake-captured", { me }); } catch {}
+    }
+    desktopLink
+      .call(ch, me, args)
+      .then((data) => {
+        if (this.dead) return;
+        this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize(data === undefined ? null : data)]));
+      })
+      .catch((error) => {
+        if (this.dead) return;
+        this.toPage(1, Buffer.concat([rpcSerialize([202, rid]), rpcSerialize({ message: String((error && error.message) || error).slice(0, 300), name: "Error" })]));
+        log("call-error", { ch, me, msg: String((error && error.message) || error).slice(0, 160) });
+      });
+  }
+  // 事件订阅（EventListen=102）：注册 desktopLink.listen；事件以 [204, 页面rid] 帧回页面
+  forwardListen(rid, ch, me, args) {
+    desktopLink
+      .listen(ch, me, args, (data) => {
+        if (this.dead) return;
+        this.toPage(1, Buffer.concat([rpcSerialize([204, rid]), rpcSerialize(data === undefined ? null : data)]));
+      })
+      .then((lid) => {
+        if (this.dead) { desktopLink.unlisten(lid); return; }
+        this.linkListens.set(rid, lid);
+      })
+      .catch((error) => {
+        if (this.dead) return;
+        this.toPage(1, Buffer.concat([rpcSerialize([202, rid]), rpcSerialize({ message: String((error && error.message) || error).slice(0, 300), name: "Error" })]));
+        log("listen-error", { ch, me, msg: String((error && error.message) || error).slice(0, 160) });
+      });
   }
   // 限流闸：同一页面 60 秒内发超过 25 次会话命令即判"卡循环"，后续命令丢弃（仍回 Ack 保持连接），
-  // 避免桌面端被反复拉起会话进程、窗口被顶回前台（2026-09-29 实测页面卡循环 48 次/分钟引发）。
-  shouldDropFlood(body) {
-    try {
-      const p = rpcParseFrame(body);
-      const [tc, , ch, me] = p.header || [];
-      if (tc !== 100 || ch !== "zcode-agent" || me !== "sendConversationCommandV4") return false;
-      const now = Date.now();
-      this.cmdWindow = (this.cmdWindow || []).filter((t) => now - t < 60000);
-      this.cmdWindow.push(now);
-      if (this.cmdWindow.length > 25) {
-        if (!this.cmdFloodLogged || now - this.cmdFloodLogged > 60000) {
-          this.cmdFloodLogged = now;
-          log("agent-command-flood", { count: this.cmdWindow.length, action: "drop" });
-        }
-        return true;
+  // 避免桌面端被反复拉起会话进程（2026-09-29 实测页面卡循环 48 次/分钟引发）。
+  shouldDropFlood(tc, ch, me) {
+    if (tc !== 100 || ch !== "zcode-agent" || me !== "sendConversationCommandV4") return false;
+    const now = Date.now();
+    this.cmdWindow = (this.cmdWindow || []).filter((t) => now - t < 60000);
+    this.cmdWindow.push(now);
+    if (this.cmdWindow.length > 25) {
+      if (!this.cmdFloodLogged || now - this.cmdFloodLogged > 60000) {
+        this.cmdFloodLogged = now;
+        log("agent-command-flood", { count: this.cmdWindow.length, action: "drop" });
       }
-      return false;
-    } catch { return false; }
-  }
-  // 任务列表就地应答：绕过后端（CLI）与桌面端的数据根差异，直接读桌面端任务索引
-  tryLocalTaskList(body) {
-    let parsed;
-    try { parsed = rpcParseFrame(body); } catch { return false; }
-    const header = parsed.header;
-    if (!Array.isArray(header)) return false;
-    const [tcode, rid, channel, method] = header;
-    if (tcode === 100 && channel === "window-controller") {
-      log("window-controller-req", { method, args: JSON.stringify(parsed.body).slice(0, 400) });
-      // 就地应答（CLI 后端不实现该通道；页面首页/侧栏的列表与订阅全靠它）
-      try {
-        const argObj = Array.isArray(parsed.body) && parsed.body[0] && typeof parsed.body[0] === "object" ? parsed.body[0] : {};
-        if (!this.subs) this.subs = new Map();
-        if (method === "subscribeControllerV4") {
-          const subscriptionId = "sub-" + crypto.randomBytes(6).toString("hex");
-          this.subs.set(subscriptionId, String(argObj.topic || ""));
-          this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize({ ack: { subscriptionId } })]));
-          log("controller-subscribed", { topic: argObj.topic, subscriptionId });
-          // 订阅即推首帧快照：页面注册表只认 payload.kind='snapshot' 的帧，没它列表永远为空
-          this.pushControllerSnapshot(subscriptionId, String(argObj.topic || ""));
-          this.startControllerDeltaPoll();
-          return true;
-        }
-        if (method === "unsubscribeControllerV4") {
-          if (typeof argObj.subscriptionId === "string") this.subs.delete(argObj.subscriptionId);
-          this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize({ ack: { subscriptionId: String(argObj.subscriptionId || "") } })]));
-          log("controller-unsubscribed", { subscriptionId: argObj.subscriptionId });
-          return true;
-        }
-        if (method === "resyncControllerV4") {
-          this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize({ ack: { subscriptionId: String(argObj.subscriptionId || "") } })]));
-          const topic = this.subs.get(String(argObj.subscriptionId || ""));
-          if (topic) this.pushControllerSnapshot(String(argObj.subscriptionId), topic, true);
-          log("controller-resync", { subscriptionId: argObj.subscriptionId, topic });
-          return true;
-        }
-        if (method === "listTaskList") {
-          const payload = buildTaskListPayload(argObj);
-          this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize(payload)]));
-          log("controller-task-list", { kind: argObj.kind, count: payload.items.length, total: payload.total });
-          return true;
-        }
-      } catch (e) {
-        log("window-controller-error", { method, msg: String(e).slice(0, 200) });
-      }
-      return false; // 未实现的方法仍转给后端
-    }
-    // 事件监听：页面订阅"动态控制器帧"（EventListen=102）——记住监听 id，快照/增量都用它推（EventFire=204）
-    if (tcode === 102 && channel === "window-controller" && method === "onDynamicControllerFrame") {
-      this.dynListenerId = rid;
-      log("controller-listener", { rid });
-      return true; // 不转发后端（后端不认该通道）
-    }
-    if (tcode !== 100 || channel !== "zcode-task") return false;
-    if (!["listTasks", "listPinnedTasks", "listArchivedTasks"].includes(method)) return false;
-    try {
-      const argObj = Array.isArray(parsed.body) && parsed.body[0] && typeof parsed.body[0] === "object" ? parsed.body[0] : {};
-      const workspacePath = argObj.workspacePath || CFG.workspacePath;
-      const tasks = queryTasks(CFG.tasksIndexPath, method, workspacePath);
-      this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize(tasks)]));
-      log("local-task-list", { method, count: tasks.length, wsPath: workspacePath, provider: CFG.provider, db: CFG.tasksIndexPath });
       return true;
-    } catch (e) {
-      log("local-task-list-error", { msg: String(e) });
-      return false;
     }
+    return false;
   }
   toPage(type, body, ackOverride) {
     if (this.dead) return;
@@ -658,98 +666,21 @@ class WorkspaceRelay {
     head.writeUInt32BE(body.length, 9);
     this.conn.sendBinary(Buffer.concat([head, body]));
   }
-  // 推一帧 EventFire(204)：页面 rpe 客户端按监听 id 分发到 onDynamicControllerFrame
-  pushControllerFrame(subscriptionId, topic, payloadObj) {
-    if (!this.dynListenerId) return false;
-    if (!this.logEpoch) this.logEpoch = "le-" + Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
-    if (!this.subsSeq) this.subsSeq = new Map();
-    const meta = this.subsSeq.get(subscriptionId) || { seq: 0 };
-    meta.seq += 1;
-    this.subsSeq.set(subscriptionId, meta);
-    const frame = {
-      topic,
-      subscriptionId,
-      logEpoch: this.logEpoch,
-      fromSeq: payloadObj.kind === "snapshot" ? 0 : meta.seq - 1,
-      toSeq: meta.seq,
-      sentAt: Date.now(),
-      payload: payloadObj,
-    };
-    this.toPage(1, Buffer.concat([rpcSerialize([204, this.dynListenerId]), rpcSerialize(frame)]));
-    log("controller-push", { topic, subscriptionId, kind: payloadObj.kind, seq: meta.seq });
-    return true;
-  }
-  pushControllerSnapshot(subscriptionId, topic) {
-    if (!this.dynListenerId) return;
-    if (!this.logEpoch) this.logEpoch = "le-" + Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
-    if (topic === "controller/workspaces") {
-      this.pushControllerFrame(subscriptionId, topic, {
-        kind: "snapshot",
-        snapshot: {
-          protocolVersion: 1,
-          logEpoch: this.logEpoch,
-          workspaces: [{ workspacePath: CFG.workspacePath, sourceAvailability: "online", connectionState: "online" }],
-        },
-      });
-      return;
-    }
-    if (topic === "controller/tasks-index") {
-      const items = buildTaskListPayload({ kind: "timeline" }).items;
-      this.taskSig = taskSignature(items);
-      this.pushControllerFrame(subscriptionId, topic, {
-        kind: "snapshot",
-        snapshot: { protocolVersion: 1, logEpoch: this.logEpoch, tasks: items },
-      });
-      return;
-    }
-    log("controller-push-skip", { topic });
-  }
-  // 任务索引增量轮询：每 5 秒比对签名，变化即推 deltas（列表实时性）
-  startControllerDeltaPoll() {
-    if (this.deltaTimer) return;
-    this.deltaTimer = setInterval(() => {
-      try {
-        if (!this.dynListenerId || !this.subs) return;
-        const sids = [...this.subs.entries()].filter(([, t]) => t === "controller/tasks-index").map(([sid]) => sid);
-        if (!sids.length) return;
-        const items = buildTaskListPayload({ kind: "timeline" }).items;
-        const sig = taskSignature(items);
-        const prev = this.taskSig || new Map();
-        const deltas = [];
-        for (const it of items) {
-          const key = it.address.taskId;
-          if (prev.get(key) !== sig.get(key)) deltas.push({ op: "task.upserted", task: it });
-        }
-        for (const key of prev.keys()) {
-          if (!sig.has(key)) deltas.push({ op: "task.removed", address: { taskId: key, workspacePath: CFG.workspacePath } });
-        }
-        this.taskSig = sig;
-        if (deltas.length) for (const sid of sids) this.pushControllerFrame(sid, "controller/tasks-index", { kind: "deltas", deltas });
-      } catch (e) {
-        log("controller-delta-error", { msg: String(e).slice(0, 160) });
-      }
-    }, 5000);
-  }
   teardown(why) {
     if (this.dead) return;
     this.dead = true;
-    if (this.deltaTimer) { try { clearInterval(this.deltaTimer); } catch {} this.deltaTimer = null; }
+    try { this.offLinkDown && this.offLinkDown(); } catch {}
+    for (const lid of this.linkListens.values()) {
+      try { desktopLink.unlisten(lid); } catch {}
+    }
+    this.linkListens.clear();
     if (this.pingTimer) { try { clearInterval(this.pingTimer); } catch {} this.pingTimer = null; }
-    try { this.backend && this.backend.close(); } catch {}
     try { this.conn.close(1000); } catch {}
     log("workspace-close", { why });
   }
 }
 
-// ── 后端进程托管（可选；增强功能开关接入后由桌面端触发）─────────────────
-let backendProc = null;
-async function startBackend() {
-  if (!CFG.spawnBackend) return;
-  const { spawn } = await import("node:child_process");
-  backendProc = spawn(CFG.spawnBackend.command, CFG.spawnBackend.args || [], { stdio: "ignore", detached: false });
-  log("backend-spawn", { cmd: CFG.spawnBackend.command });
-}
-startBackend().catch((e) => log("error", { where: "startBackend", msg: String(e) }));
+// ── 后端进程托管已退役（同进程直连改造 2026-09-30）：数据面=desktopLink ─────
 
 // ── Phase 5：Server酱³ 推送（持久订阅会话索引 + 实时推送 + 去重）──
 // 完成推送判据：phase ∈ {completedSuccess,error} 且 hasBackgroundWork!==true 且 sessionEnded===true。
@@ -835,86 +766,61 @@ function handleSessionsSnapshot(sessions) {
   }
 }
 // —— 桥的持久后端订阅（不依赖手机是否在线）——
-let notifySub = null;
+let notifySubCancel = null;
+// Server酱³ 推送订阅（同进程直连版）：数据源=桌面端 sessions-index。
+// 桌面 host 的 wire 帧形状为 {frame:{payload:{snapshot|deltas}}}（与旧 EventFire 内层一致），
+// 做一层防御：若 host 直接推 payload 本体也兼容。
+function handleNotifyWire(data) {
+  try {
+    const frame = (data && data.frame) ? data.frame : data;
+    const payload = frame && frame.payload;
+    const snap = payload && payload.snapshot;
+    if (snap && Array.isArray(snap.sessions)) {
+      const wasSeeded = notifySeeded;
+      handleSessionsSnapshot(snap.sessions);
+      if (!wasSeeded) { notifySeeded = true; saveNotifyState(); log("notify-seeded", { n: snap.sessions.length }); }
+    }
+    const delta = payload && payload.deltas;
+    if (Array.isArray(delta)) {
+      for (const d of delta) {
+        if (d && d.op === "session.removed" && d.sessionId && notifyState.asks[d.sessionId]) {
+          delete notifyState.asks[d.sessionId];
+          saveNotifyState();
+        }
+      }
+      const sessions = delta.filter((d) => d && d.op === "session.upserted" && d.session).map((d) => d.session);
+      if (sessions.length) handleSessionsSnapshot(sessions);
+    }
+  } catch (e) {
+    log("notify-wire-error", { msg: String(e).slice(0, 160) });
+  }
+}
 function startNotifySubscription() {
   const cfg = loadNotifyConfig();
   if (!cfg || !cfg.enabled) { log("notify-disabled", { path: CFG.notifyConfigPath }); return; }
-  const ws = new WebSocket(CFG.backendWs);
-  ws.binaryType = "arraybuffer";
-  notifySub = ws;
-  let rid = 0;
-  const initId = { v: 0 };
-  const sendRpc = (channel, method, args) => {
-    const id = ++rid;
-    const body = Buffer.concat([rpcSerialize([100, id, channel, method]), rpcSerialize(args === undefined ? null : args)]);
-    const h = Buffer.alloc(13);
-    h.writeUInt8(1, 0); h.writeUInt32BE(0, 1); h.writeUInt32BE(0, 5); h.writeUInt32BE(body.length, 9);
-    ws.send(Buffer.concat([h, body]));
-    return id;
+  if (notifySubCancel) {
+    try { notifySubCancel(); } catch {}
+  }
+  let done = false;
+  const retryLater = () => {
+    if (done) return;
+    done = true;
+    try { offDown(); } catch {}
+    notifySubCancel = null;
+    setTimeout(startNotifySubscription, 5000);
   };
-  const sendListen = (channel, method, args) => {
-    const id = ++rid;
-    const body = Buffer.concat([rpcSerialize([102, id, channel, method]), rpcSerialize(args === undefined ? null : args)]);
-    const h = Buffer.alloc(13);
-    h.writeUInt8(1, 0); h.writeUInt32BE(0, 1); h.writeUInt32BE(0, 5); h.writeUInt32BE(body.length, 9);
-    ws.send(Buffer.concat([h, body]));
-    return id;
-  };
-  ws.addEventListener("open", () => {
-    log("notify-sub-open", {});
-    // 事件订阅（页面同款）：onDynamicSessionsIndexFrame（102 EventListen），再走三步握手
-    sendListen("zcode-agent", "onDynamicSessionsIndexFrame", { workspacePath: CFG.workspacePath });
-    initId.v = sendRpc("zcode-agent", "helloConversationV4", []);
+  const offDown = desktopLink.onDown(retryLater);
+  notifySubCancel = () => { done = true; try { offDown(); } catch {} };
+  (async () => {
+    await desktopLink.call("zcode-agent", "helloConversationV4", []);
+    await desktopLink.call("zcode-agent", "initializeConversationV4", [{ kind: "clientHello", protocolVersion: 3, clientId: "client-" + crypto.randomUUID(), clientKind: "web", appVersion: "unknown", capabilities: { workspaceHookReviewUi: true } }]);
+    const listenId = await desktopLink.listen("zcode-agent", "onDynamicSessionsIndexFrame", { workspacePath: CFG.workspacePath }, handleNotifyWire);
+    await desktopLink.call("zcode-agent", "subscribeSessionsIndexV4", [{ workspacePath: CFG.workspacePath, runtimePolicy: "start-if-needed" }]);
+    log("notify-subscribed", { workspacePath: CFG.workspacePath, listenId });
+  })().catch((error) => {
+    log("notify-sub-error", { msg: String((error && error.message) || error).slice(0, 200) });
+    retryLater();
   });
-  ws.addEventListener("message", (ev) => {
-    const b = Buffer.from(ev.data);
-    if (b.length < 13) return;
-    const type = b.readUInt8(0);
-    if (type !== 1) return;
-    const len = b.readUInt32BE(9);
-    try {
-      const p = rpcParseFrame(b.subarray(13, 13 + len));
-      const [tcode, rmid] = p.header || [];
-      if (CFG.debugAgent) log("notify-frame", { tcode, rmid, err: tcode === 202 || tcode === 203 ? JSON.stringify(p.body).slice(0, 300) : undefined });
-      if (initId.v && rmid === initId.v) {
-        const stage = initId.stage || "hello";
-        if (stage === "hello") {
-          initId.stage = "init";
-          initId.v = sendRpc("zcode-agent", "initializeConversationV4", [{ kind: "clientHello", protocolVersion: 3, clientId: "client-" + crypto.randomUUID(), clientKind: "web", appVersion: "unknown", capabilities: { workspaceHookReviewUi: true } }]);
-          return;
-        }
-        if (stage === "init") {
-          initId.stage = "sub";
-          initId.v = sendRpc("zcode-agent", "subscribeSessionsIndexV4", [{ workspacePath: CFG.workspacePath, runtimePolicy: "start-if-needed" }]);
-          log("notify-subscribed", { workspacePath: CFG.workspacePath, initOk: tcode === 201 });
-          return;
-        }
-        initId.v = 0;
-        return;
-      }
-      if (tcode !== 204) return;
-      const frame = p.body && p.body.frame;
-      const snap = frame && frame.payload && frame.payload.snapshot;
-      if (snap && Array.isArray(snap.sessions)) {
-        const wasSeeded = notifySeeded;
-        handleSessionsSnapshot(snap.sessions);
-        if (!wasSeeded) { notifySeeded = true; saveNotifyState(); log("notify-seeded", { n: snap.sessions.length }); }
-      }
-      const delta = frame && frame.payload && frame.payload.deltas;
-      if (Array.isArray(delta)) {
-        for (const d of delta) {
-          if (d && d.op === "session.removed" && d.sessionId && notifyState.asks[d.sessionId]) {
-            delete notifyState.asks[d.sessionId];
-            saveNotifyState();
-          }
-        }
-        const sessions = delta.filter((d) => d && d.op === "session.upserted" && d.session).map((d) => d.session);
-        if (sessions.length) handleSessionsSnapshot(sessions);
-      }
-    } catch {}
-  });
-  ws.addEventListener("close", (ev) => { log("notify-sub-closed", { code: ev.code, reason: String(ev.reason || "").slice(0, 120) }); setTimeout(startNotifySubscription, 5000); });
-  ws.addEventListener("error", (ev) => { log("notify-sub-error", { msg: String((ev && ev.message) || ev).slice(0, 200) }); });
 }
 
 // ── Phase 4：公网隧道（cloudflared 快速隧道 + DNSHE 固定域名自动同步）──
@@ -1115,4 +1021,4 @@ httpServer.listen(CFG.port, CFG.host, () => {
   startTunnel();
   startTunnelWatchdog();
 });
-process.on("SIGINT", () => { try { backendProc && backendProc.kill(); } catch {} process.exit(0); });
+process.on("SIGINT", () => process.exit(0));

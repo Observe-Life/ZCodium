@@ -62,6 +62,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHostResourceUsageResponder } from "./hostResourceUsage.js";
 import { startBotsBridgeServer, type BotsBridgeServerHandle } from "./botsBridgeServer.js";
+import { startMobileRpcBridge, type MobileRpcBridgeHandle } from "./mobileRpcBridgeServer.js";
 import {
   HostMessageTypes,
   HostResponseTypes,
@@ -1519,6 +1520,69 @@ let activeBotsBridge: {
   handle: BotsBridgeServerHandle;
 } | null = null;
 
+// ── 手机远控本地 RPC 桥（custom 分支）：跟随 setting.json 开关，幂等同步 ──
+// 手机数据面经此服务直连本 host 的服务实例（与桌面 UI 同一本账、同一份事件源）。
+// 多窗口 host 竞争端口时由 EADDRINUSE→port=0 降级，轮询天然重试（持桥 host 退出后接管）。
+let activeMobileRpcBridge: MobileRpcBridgeHandle | null = null;
+let activeMobileRpcToken = "";
+let mobileRpcClosing = false;
+let mobileRpcSyncTimer: ReturnType<typeof setInterval> | null = null;
+async function syncMobileRpcBridge(services: ServiceCollection): Promise<void> {
+  if (mobileRpcClosing) {
+    return;
+  }
+  const settingService = services.getOptional(ISettingService);
+  if (!settingService) {
+    return;
+  }
+  let desiredToken = "";
+  try {
+    const mobile = (await settingService.get()).mobileRemoteControl;
+    if (mobile?.enabled && mobile.token?.trim()) {
+      desiredToken = mobile.token.trim();
+    }
+  } catch {
+    return;
+  }
+  if (!desiredToken) {
+    if (activeMobileRpcBridge) {
+      const closing = activeMobileRpcBridge;
+      activeMobileRpcBridge = null;
+      activeMobileRpcToken = "";
+      await closing.close().catch(() => undefined);
+      logger.info("[mobile-rpc] disabled: bridge closed");
+    }
+    return;
+  }
+  if (activeMobileRpcBridge && activeMobileRpcToken === desiredToken) {
+    return;
+  }
+  if (activeMobileRpcBridge) {
+    // 令牌轮换：先关旧再开新（同步等端口落定，避免自占重建失败）。
+    const closing = activeMobileRpcBridge;
+    activeMobileRpcBridge = null;
+    await closing.close().catch(() => undefined);
+  }
+  const handle = await startMobileRpcBridge({ services, token: desiredToken, logger });
+  if (handle.port > 0) {
+    activeMobileRpcBridge = handle;
+    activeMobileRpcToken = desiredToken;
+  }
+}
+async function disposeMobileRpcBridge(): Promise<void> {
+  mobileRpcClosing = true;
+  if (mobileRpcSyncTimer) {
+    clearInterval(mobileRpcSyncTimer);
+    mobileRpcSyncTimer = null;
+  }
+  const closing = activeMobileRpcBridge;
+  activeMobileRpcBridge = null;
+  activeMobileRpcToken = "";
+  if (closing) {
+    await closing.close().catch(() => undefined);
+  }
+}
+
 /**
  * 启动 AstrBot 桥接：官方 BotsService 持业务状态，astrbotProvider 持传输。
  * inbound 帧走 handleProviderCallback("astrbot", ...)，outbound 由 provider 经 handle.transport 广播。
@@ -1889,6 +1953,7 @@ async function disposeHostResources(reason: string): Promise<HostShutdownResult>
     cronAutomationRepo.close();
 
     await disposeBotsBridge();
+    await disposeMobileRpcBridge();
 
     if (activeSessionRealtimePort) {
       activeSessionRealtimePort.dispose();
@@ -2548,6 +2613,16 @@ parentPort.on("message", async (e: Electron.MessageEvent) => {
         await startBotsBridge(services).catch((error) => {
           logger.warn("start bots bridge failed", error);
         });
+        // 手机远控本地 RPC 桥（custom）：开关驱动 + 5 秒幂等轮询（设置变化/持桥窗口关闭后自愈接管）。
+        await syncMobileRpcBridge(services).catch((error) => {
+          logger.warn("start mobile rpc bridge failed", error);
+        });
+        if (!mobileRpcSyncTimer) {
+          mobileRpcSyncTimer = setInterval(() => {
+            void syncMobileRpcBridge(services).catch(() => undefined);
+          }, 5_000);
+          mobileRpcSyncTimer.unref?.();
+        }
         hasDisposedHostResources = false;
         disposeHostResourcesInFlight = null;
         const agentWarmupTargets =
