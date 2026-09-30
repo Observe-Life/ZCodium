@@ -401,6 +401,12 @@ export function resolveDefaultZCodeAgentCommand(
         command,
         args: parseArgsJson(process.env.ZCODE_AGENT_SERVER_ARGS_JSON) ?? ["app-server", "--stdio"],
         cwd: process.env.ZCODE_AGENT_SERVER_CWD?.trim() || context.workspacePath,
+        // 根因修复：web 部署态把 ZCODE_AGENT_SERVER_COMMAND 指到 Electron 自身（process.execPath），
+        // 而继承来的 ELECTRON_RUN_AS_NODE 会被 sanitizeZCodeRuntimeEnv 剔除；此分支若不显式补回，
+        // Agent 子进程将以完整 Electron 应用启动：Chromium/主进程日志混入 stdout 破坏 NDJSON 协议
+        // （protocol_parse_error → transport 关闭 → runtime 永不就绪），手机订阅失败即循环重试，
+        // 每次重试再生灭一个整应用进程 = 鼠标转圈与会话窗口空白的共同根因。
+        env: { ELECTRON_RUN_AS_NODE: "1" },
       },
       context.presentationSurface,
     );
