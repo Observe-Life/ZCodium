@@ -116,14 +116,17 @@ export function createWindow(options: {
     options.logger.info(`[createWindow] dom-ready fired (${label})`);
 
     /*
-     * 用户要求（2026-09-30）：外部触发（手机远控打开会话等）绝不能把窗口抢到前台。
-     * 这里是"切走又被反复切回"的真正元凶：Windows 上每个窗口 dom-ready 都无条件 show()+focus()，
-     * 手机侧重试会让渲染层反复重载，每次都抢一次焦点。
-     * 改为 showInactive()：窗口正常出现，但不抢用户焦点；
-     * 双击图标/托盘等用户主动操作另有各自的激活路径，不受影响。
+     * v2（2026-09-30 同进程直连改造）：窗口**首次** dom-ready 保持官方 show()+focus()
+     * （启动即见窗、双击置顶体验与云端 e2e 菜单断言都依赖它）；
+     * renderer 重载再次触发 dom-ready 时**不再做任何激活**——"切走又被反复切回"的
+     * 病灶是手机重试导致反复 reload、每次 ready 抢一次焦点（v1 曾一律改 showInactive，
+     * 把首显一并误伤、破坏 e2e，故改为仅首次生效）。
+     * 外部激活另有三层防护：深链去激活（fbdbd63/b86c166）、外部 OpenWorkspace
+     * 命令拦截（90be76b，保留）、同进程直连后手机操作不再触发桌面渲染层 reload。
      */
-    if (process.platform === "win32" && !win.isDestroyed()) {
-      win.showInactive();
+    if (process.platform === "win32" && !win.isDestroyed() && currentDomReadyGeneration === 1) {
+      win.show();
+      win.focus();
     }
 
     const oldChild = options.windowHostProcessMap.get(wcId);
