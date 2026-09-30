@@ -608,6 +608,14 @@ class WorkspaceRelay {
   }
   // Promise 型 RPC：desktopLink 结果封装为 201/202 帧回页面（错误体形状与旧链路一致）
   forwardCall(rid, ch, me, args) {
+    // oauth.*：桌面端与旧 web 后端都没有该通道（官方版走云端登录）。旧链路上页面收到
+    // unknown-channel 错误帧后走兜底、无碍；这里按 platform stub 同款做法给"干净的
+    // 空值"，页面初始化少两次报错路径（手机适配迭代 2026-09-30 R3）。
+    if (ch === "oauth") {
+      const stub = me === "getActiveProvider" ? { activeProvider: null } : null;
+      this.toPage(1, Buffer.concat([rpcSerialize([201, rid]), rpcSerialize(stub)]));
+      return;
+    }
     if (CFG.debugAgent && ch === "zcode-agent" && (me === "initializeConversationV4" || me === "subscribeSessionsIndexV4")) {
       try { fs.writeFileSync(path.join(HERE, `handshake_${me}.json`), JSON.stringify(args)); log("handshake-captured", { me }); } catch {}
     }
